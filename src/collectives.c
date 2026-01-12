@@ -176,6 +176,8 @@ shmem_internal_collectives_init(void)
             shmem_internal_barrier_type = TREE;
         } else if (0 == strcmp(type, "dissem")) {
             shmem_internal_barrier_type = DISSEM;
+        } else if (0 == strcmp(type, "hw_accel")) {
+            shmem_internal_barrier_type = HW_ACCEL;
         } else {
             RAISE_WARN_MSG("Ignoring bad barrier algorithm '%s'\n", type);
         }
@@ -188,6 +190,8 @@ shmem_internal_collectives_init(void)
             shmem_internal_bcast_type = LINEAR;
         } else if (0 == strcmp(type, "tree")) {
             shmem_internal_bcast_type = TREE;
+        } else if (0 == strcmp(type, "hw_accel")) {
+            shmem_internal_bcast_type = HW_ACCEL;
         } else {
             RAISE_WARN_MSG("Ignoring bad broadcast algorithm '%s'\n", type);
         }
@@ -204,6 +208,8 @@ shmem_internal_collectives_init(void)
             shmem_internal_reduce_type = TREE;
         } else if (0 == strcmp(type, "recdbl")) {
             shmem_internal_reduce_type = RECDBL;
+        } else if (0 == strcmp(type, "hw_accel")) {
+            shmem_internal_reduce_type = HW_ACCEL;
         } else {
             RAISE_WARN_MSG("Ignoring bad reduction algorithm '%s'\n", type);
         }

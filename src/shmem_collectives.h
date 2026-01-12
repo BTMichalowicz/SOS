@@ -25,7 +25,8 @@ enum coll_type_t {
     TREE,
     DISSEM,
     RING,
-    RECDBL
+    RECDBL,
+    HW_ACCEL
 };
 typedef enum coll_type_t coll_type_t;
 
@@ -44,6 +45,7 @@ extern coll_type_t shmem_internal_fcollect_type;
 void shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync);
 void shmem_internal_sync_tree(int PE_start, int PE_stride, int PE_size, long *pSync);
 void shmem_internal_sync_dissem(int PE_start, int PE_stride, int PE_size, long *pSync);
+void shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync);
 
 static inline
 void
@@ -72,6 +74,9 @@ shmem_internal_sync(int PE_start, int PE_stride, int PE_size, long *pSync)
         break;
     case DISSEM:
         shmem_internal_sync_dissem(PE_start, PE_stride, PE_size, pSync);
+        break;
+    case HW_ACCEL:
+        shmem_internal_sync_hw_accel(PE_start, PE_stride, PE_size, pSync);
         break;
     default:
         RAISE_ERROR_MSG("Illegal barrier/sync type (%d)\n",
@@ -116,6 +121,9 @@ void shmem_internal_bcast_linear(void *target, const void *source, size_t len,
 void shmem_internal_bcast_tree(void *target, const void *source, size_t len,
                                int PE_root, int PE_start, int PE_stride, int PE_size,
                                long *pSync, int complete);
+void shmem_internal_bcast_hw_accel(void *target, const void *source, size_t len,
+                               int PE_root, int PE_start, int PE_stride, int PE_size,
+                               long *pSync, int complete);
 
 static inline
 void
@@ -141,6 +149,10 @@ shmem_internal_bcast(void *target, const void *source, size_t len,
         shmem_internal_bcast_tree(target, source, len, PE_root, PE_start,
                                   PE_stride, PE_size, pSync, complete);
         break;
+    case HW_ACCEL:
+        shmem_internal_bcast_hw_accel(target, source, len, PE_root, PE_start,
+                                  PE_stride, PE_size, pSync, complete);
+        break;
     default:
         RAISE_ERROR_MSG("Illegal broadcast type (%d)\n",
                         shmem_internal_bcast_type);
@@ -162,6 +174,10 @@ void shmem_internal_op_to_all_tree(void *target, const void *source, size_t coun
                                    shm_internal_op_t op, shm_internal_datatype_t datatype);
 
 void shmem_internal_op_to_all_recdbl_sw(void *target, const void *source, size_t count, size_t type_size,
+                                   int PE_start, int PE_stride, int PE_size,
+                                   void *pWrk, long *pSync,
+                                   shm_internal_op_t op, shm_internal_datatype_t datatype);
+void shmem_internal_op_to_all_hw_accel(void *target, const void *source, size_t count, size_t type_size,
                                    int PE_start, int PE_stride, int PE_size,
                                    void *pWrk, long *pSync,
                                    shm_internal_op_t op, shm_internal_datatype_t datatype);
@@ -231,6 +247,11 @@ shmem_internal_op_to_all(void *target, const void *source, size_t count,
             shmem_internal_op_to_all_recdbl_sw(target, source, count, type_size,
                                                PE_start, PE_stride, PE_size,
                                                pWrk, pSync, op, datatype);
+            break;
+        case HW_ACCEL:
+            shmem_internal_op_to_all_hw_accel(target, source, count, type_size,
+                                                PE_start, PE_stride, PE_size,
+                                                pWrk, pSync, op, datatype);
             break;
         default:
             RAISE_ERROR_MSG("Illegal reduction type (%d)\n",
