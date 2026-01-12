@@ -305,6 +305,19 @@ shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync
 }
 
 
+/* TODO: Currently applies ONLY to libfabrics implementations
+ * TODO: ALSO needs Slingshot and OFI setups here 
+ */
+void
+shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync) {
+    fi_addr_t *fi_addrs = NULL;
+    fi_addr_t my_addr = {};
+    size_t my_addr_len;
+
+
+}
+
+
 void
 shmem_internal_sync_tree(int PE_start, int PE_stride, int PE_size, long *pSync)
 {
