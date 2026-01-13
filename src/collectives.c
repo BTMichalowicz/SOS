@@ -22,6 +22,24 @@
 #include "shmem_collectives.h"
 #include "shmem_internal_op.h"
 
+/* Libfabric shenanignas */
+#include <ofi.h>
+#include <cxip.h>
+#include <sys/time.h>
+
+static inline double getwtime(void) {
+    double wtime = 0.0;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    wtime = tv.tv_sec;
+    wtime += (double)tv.tv_usec / 1.0e6;
+    return wtime;
+}
+
+
+
+/* End Libfabric shenanigans */
+
 coll_type_t shmem_internal_barrier_type = AUTO;
 coll_type_t shmem_internal_bcast_type = AUTO;
 coll_type_t shmem_internal_reduce_type = AUTO;
@@ -36,7 +54,8 @@ char *coll_type_str[] = { "AUTO",
                           "TREE",
                           "DISSEM",
                           "RING",
-                          "RECDBL" };
+                          "RECDBL",
+                          "HW_ACCEL" };
 
 static int *full_tree_children;
 static int full_tree_num_children;
@@ -312,7 +331,13 @@ void
 shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync) {
     fi_addr_t *fi_addrs = NULL;
     fi_addr_t my_addr = {};
-    size_t my_addr_len;
+    size_t my_addr_len = 0;
+
+    uint64_t context = 0;
+    int i = 0, ret  = 0;
+
+    shmem_transport_ctx_t *ctx = SHMEM_CTX_DEFAULT;
+    struct fid_ep = ctx->ep;
 
 
 }

@@ -1477,6 +1477,7 @@ int query_for_fabric(struct fabric_info *info)
     hints.caps   = FI_RMA |     /* request rma capability
                                    implies FI_READ/WRITE FI_REMOTE_READ/WRITE */
                    FI_ATOMIC;  /* request atomics capability */
+    hints.caps  |= FI_COLLECTIVE; /* Requesting collective support for MR's and EP's */
 #if ENABLE_TARGET_CNTR
     hints.caps |= FI_RMA_EVENT; /* want to use remote counters */
 #endif /* ENABLE_TARGET_CNTR */
