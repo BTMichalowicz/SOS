@@ -47,6 +47,45 @@ void shmem_internal_sync_tree(int PE_start, int PE_stride, int PE_size, long *pS
 void shmem_internal_sync_dissem(int PE_start, int PE_stride, int PE_size, long *pSync);
 void shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync);
 
+
+
+/* begin ben shenanigans - Start Jan 13 2026 */
+
+#ifndef container_of
+#define container_of(ptr, type, field) \
+        ((type *) ((char *) ptr - offsetof(type, field)))
+#endif
+
+
+typedef struct avset_ary{
+    struct fid_av_set **avset;
+    int avset_cnt;
+    int avset_siz;
+} avset_ary_t;
+
+struct join_item {
+    struct dlist_entry entry;
+    struct fid_av_set *avset;
+    struct fid_mc *mc;
+    int join_index;
+    int prov_errno;
+    int retval;
+};
+
+void avset_ary_init(avset_ary_t *setary);
+void avset_ary_destroy(avset_ary_t *setary);
+int avset_ary_depend(avset_ary_t *setary);
+void *cq_poll(struct fid_cq *tx_cq, struct fid_cq *rx_cq);
+int eq_poll(struct fid_ep *cx_ep);
+int coll_multi_join(struct fid_ep *cx_ep, avset_arty_t *setary, struct dlist_entry *joinlist,
+        int limit);
+int simple_join(fi_addr_t *fi_addrs, size_t size, 
+                    avset_ary setary,
+                    struct dlist_entry join_list)
+
+/* end ben shenanigans */
+
+
 static inline
 void
 shmem_internal_sync(int PE_start, int PE_stride, int PE_size, long *pSync)

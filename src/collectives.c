@@ -37,6 +37,236 @@ static inline double getwtime(void) {
 }
 
 
+/* TODO: Currently applies ONLY to libfabrics implementations
+ * TODO: ALSO needs Slingshot and OFI setups here 
+ */
+
+
+void avset_ary_init(avset_ary_t *setary)
+{
+    setary->avset = NULL;
+    setary->avset_cnt = 0;
+    setary->avset_siz = 0;
+}
+
+void avset_ary_destroy(avset_ary_t *setary)
+{
+    int i;
+
+    if (setary->avset) {
+        for (i = 0; i < setary->avset_cnt; i++)
+            fi_close(&setary->avset[i]->fid);
+        free(setary->avset);
+    }
+    avset_ary_init(setary);
+}
+
+
+
+int coll_multi_join(struct fid_ep *cx_ep, avset_arty_t *setary, struct dlist_entry *joinlist,
+        int limit)
+{
+    struct join_item *j_ctx = NULL;
+    int i = 0, ret = 0, total = 0, count = 0;
+
+    total = setary->avset_cnt;
+    jctx = calloc(1, sizeof(struct join_item));
+    if (!jctx){
+        ret = -FI_ENOMEM;
+        goto fail;
+    }
+
+    for(i = 0; i < total; i++){
+        memset(jctx, 0, sizeof(struct join_item));
+        dlist_init(&jctx->entry);
+        jctx->join_index = i;
+        jctx->avset = setary->avset[i];
+        ret = fi_join_collective(cx_ep, FI_ADDR_NOTAVAIL, setary=>avset[i], 0L,
+                &jctx->mc, jctx);
+        if (ret == -FI_CONNREFUSED){
+            free(jctx);
+            continue;
+        }
+        if (ret != FI_SUCCESS){
+            free(jctx);
+            goto jail;
+        }
+        do{
+            cq_poll(); /* TODO: How to obtain CQs? */
+            ret = eq_poll();
+        } while (ret == -FI_EAGAIN);
+        if (ret < 0){
+            free(jctx);
+            goto fail;
+        }
+        dlist_insert_tail(&jctx->entry, joinlist);
+        count++;
+    }
+
+    free(jctx);
+    return FI_SUCCESS;
+fail:
+    coll_multi_release(joinlist);
+    return ret;
+}
+
+void *cq_poll(struct fid_cq *tx, struct fid_cq *rx){
+    struct fi_cq_err_entry cq_err = {};
+    ssize_t size = 0;
+
+    /* Poll once instead of polling per operation */
+    size = fi_cq_read(rx, &cq_err, 1);
+    if (size == -FI_EAVAIL)
+        size = fi_cq_readerr(rx, &cq_err, 1);
+    if (size > 0){
+        /* Event seen! */
+    } else if (size != -FI_EAGAIN){
+        /* ERROR seen -- wait do we really need these bits? */
+    }
+
+    size = fi_cq_read(tx, &cq_err, 1);
+    if (size == -FI_EVAIL)
+        size = fi_cq_readerr(tx, &cq_err, 1);
+    if (size > 0)
+        return cq_err.op_context;
+
+    
+    return NULL;
+}
+
+int eq_poll(struct fid_ep *cx_ep){
+
+    struct cxip_cp *ep;
+    struct fid_eq *eq;
+    struct fiq_err_entry eq_err = {};
+    struct join_item *jctx;
+    uint32_t event;
+    int ret;
+
+    ep = container_of(cx_ep, struct cxip_ep, ep);
+    eq = &ep->ep_ob->coll.eq->util_eq.eq_fid;
+
+    ret = fi_eq_read(eq, &event, &eq_err, sizeof(eq_err), 0);
+    if (ret == -FI_EAGAIN) return ret;
+    if (ret >= 0){
+        if (ret < sizeof(struct fi_eq_entry)){
+            /* TODO ERROR HERE for too small res */
+            return -FI_EINVAL;
+        }
+        if (!eq_err.context || event != FI_JOIN_COMPLETE){
+            /* PRINT ERROR unexpected response */
+            return -FI_EINVAL;
+        }
+        jctx = eq_err.context;
+        jctx->retval = 0;
+        jctx->prov_errno = 0;
+        return FI_SUCCESS;
+    }
+    if (ret == -FI_EINVAL){
+        ret = fi_eq_readerr(eq, &eq_err, 0);
+        if (ret < sizeof(struct fi_eq_err_entry)){
+            return -FI_EINVAL;
+        }
+        if (!eq_err.context){
+            //unexpected responde
+            return -FI_EINVAL;
+        }
+        jctx = eq_err.context;
+        jctx->retval = eq_err.err;
+        jctx->prov_errno = eq_err.prov_errno;
+        return FI_SUCCESS;
+    }
+    return FI_SUCCESS;
+}
+
+
+int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
+        int mcast_addr, int root_idx,
+        struct avset_ary *setary)
+{
+    struct cxip_comm_key comm_key = {
+        .keytype = (cxip_env.coll_fabric_mgr_url && create_multicast) ?
+            COMM_KEY_NONE : COMM_KEY_UNICAST,
+        .ucast.mcast_addr = mcast_addr,
+        .ucast.hwroot_idx = root_idx
+    };
+    struct fi_av_set_attr attr = {
+        .count = 0,
+        .start_addr = FI_ADDR_NOTAVAIL,
+        .end_addr = FI_ADDR_NOTAVAIL,
+        .stride = 1,
+        .comm_key_size = sizeof(comm_key),
+        .comm_key = (void *)&comm_key,
+        .flags = 0,
+    };
+    struct fid_av_set *setp;
+    int i, ret;
+
+    if (setary->avset_siz <= setary->avset_cnt) {
+        void *ptr;
+        int siz;
+
+        siz = setary->avset_siz + 4;
+        ptr = realloc(setary->avset, siz * sizeof(void *));
+        if (!ptr) {
+            ret = -FI_ENOMEM;
+            goto quit;
+        }
+        setary->avset_siz = siz;
+        setary->avset = ptr;
+    }
+    ret = fi_av_set(cxit_av, &attr, &setp, NULL);
+    if (ret) {
+        TRACE("%s fi_av_set failed %d\n", __func__, ret);
+        goto quit;
+    }
+
+
+    for (i = 0; i < size; i++) {
+        ret = fi_av_set_insert(setp, fiaddrs[i]);
+        if (ret) {
+            TRACE("%s fi_av_set_insert failed %d\n", __func__, ret);
+            goto quit;
+        }
+    }
+
+
+    setary->avset[setary->avset_cnt++] = setp;
+    return 0;
+
+quit:
+    if (setp) {
+        fi_close(&setp->fid);
+        free(setp);
+    }
+    return ret;
+}
+
+
+int simple_join(fi_addr_t *fi_addrs, size_t size, 
+                    avset_ary setary,
+                    struct dlist_entry join_list){
+    int err = 0;
+    avset_ary_init(setary);
+    err = avset_ary_append(fi_addrs, size, 0, 1, setary);
+    if (err)
+        return err;
+
+    dlist_init(join_list);
+
+    err = coll_multi_join(setary, joinlist, -1);
+    if (ret < 0)
+        return err;
+
+
+    return err;
+}
+
+
+
+/* End libfabric shenanigans */
+
+
 
 /* End Libfabric shenanigans */
 
@@ -324,9 +554,10 @@ shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync
 }
 
 
-/* TODO: Currently applies ONLY to libfabrics implementations
- * TODO: ALSO needs Slingshot and OFI setups here 
- */
+
+
+
+
 void
 shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync) {
     fi_addr_t *fi_addrs = NULL;
