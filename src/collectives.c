@@ -553,24 +553,57 @@ shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync
 
 }
 
+static uint64_t get_single_mc(struct dlist_entry *joinlist){
+    struct join_item *jctx =
+        dlist_first_entry_or_null(list, struct join_item, entry);
 
+    if (jctx == NULL){
+        return 0;
+    }
 
-
-
+    return (uint64_t)jctx->mc;
+}
 
 void
 shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync) {
-    fi_addr_t *fi_addrs = NULL;
+    fi_addr_t *fi_addrs = NULL; /* TODO: Assign */
+    size_t addr_len = 0;
     fi_addr_t my_addr = {};
     size_t my_addr_len = 0;
+    uint64_t mc = 0;
 
     uint64_t context = 0;
     int i = 0, ret  = 0;
 
+    struct dlist_entry joinlist = {};
+    avset_ary_t setary = {};
+
     shmem_transport_ctx_t *ctx = SHMEM_CTX_DEFAULT;
-    struct fid_ep = ctx->ep;
+    struct fid_ep ep = ctx->ep;
+
+    ret = simple_join(ep, fi_addrs, addr_len, &setary, &joinlist);
+    
+    if (ret != FI_SUCCESS){
+        goto quit;
+    }
+
+    mc = get_single_mc(&joinlist);
+
+    if (!mc) {
+        goto quit;
+    }
+    ret = fi_barrier(ep, mc, &ctx);
+    if (ret == FI_SUCCESS){
+        cq_wait(&ctx); /* TODO Implement */
+    }else{
+        goto quit;
+    }
 
 
+quit:
+    fprintf(stderr, "[%s][%s:%d] ERROR: %d\n",
+            __func__, __FILE__, __LINE__, ret);
+    shmem_global_exit(ret);
 }
 
 
