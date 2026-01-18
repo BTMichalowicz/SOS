@@ -396,6 +396,12 @@ shmem_transport_put_scalar(shmem_transport_ctx_t* ctx, void *target, const void 
 }
 
 
+void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
+    RAISE_ERROR_STR("NOT IMPLEMENTED"); 
+
+}
+
+
 static inline
 void
 shmem_transport_portals4_put_nb_internal(shmem_transport_ctx_t* ctx, void *target, const void *source, size_t len,

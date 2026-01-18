@@ -184,6 +184,11 @@ shmem_transport_ctx_create(struct shmem_internal_team_t *team, long options, shm
     return 0;
 }
 
+void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
+    RAISE_ERROR_STR("NOT IMPLEMENTED"); 
+
+}
+
 static inline
 void
 shmem_transport_ctx_destroy(shmem_transport_ctx_t *ctx)
