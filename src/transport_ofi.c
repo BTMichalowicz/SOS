@@ -64,7 +64,9 @@ struct fabric_info {
 struct fid_fabric*              shmem_transport_ofi_fabfd;
 struct fid_domain*              shmem_transport_ofi_domainfd;
 struct fid_av*                  shmem_transport_ofi_avfd;
-struct fid_av*                  shmem_transport_ofi_coll_avfd;
+//struct fid_av*                  shmem_transport_ofi_coll_avfd;
+struct fid_av_set*              shmem_transport_ofi_avset;
+//struct fid_av_set_attr          shmem_transport_ofi_avset_attr;
 struct fid_ep*                  shmem_transport_ofi_target_ep;
 struct fid_cq*                  shmem_transport_ofi_target_cq;
 struct fid_cq*                  shmem_transport_ofi_recv_cq;
@@ -1307,6 +1309,7 @@ int populate_av(void)
         return ret;
     }
 
+
     free(alladdrs);
 
     return 0;
@@ -1316,7 +1319,7 @@ static inline
 int allocate_fabric_resources(struct fabric_info *info)
 {
     int ret = 0;
-    struct fi_av_attr   av_attr = {0};
+    struct fi_av_attr   av_attr = {0}; 
 
 
     /* fabric domain: define domain of resources physical and logical */
@@ -1359,6 +1362,24 @@ int allocate_fabric_resources(struct fabric_info *info)
                      &shmem_transport_ofi_avfd,
                      NULL);
     OFI_CHECK_RETURN_STR(ret, "AV creation failed");
+
+    struct cxip_comm_key comm_key = {
+        .keytype = COMM_KEY_UNICAST,
+        .ucast.mcast_addr = 0,
+        .ucast.hwroot_idx = 0
+    };
+
+    struct fi_av_set_attr avset_attr = {
+        .count = 0,
+        .start_addr = FI_ADDR_NOTAVAIL,
+        .end_addr = FI_ADDR_NOTAVAIL,
+        .stride = 1,
+        .comm_key_size = sizeof(comm_key),
+        .comm_key = (void *)&comm_key,
+        .flags = 0,
+    };
+
+    ret = fi_av_set(shmem_transport_ofi_avfd, &avset_attr, &shmem_transport_ofi_avset, NULL);
 
     return ret;
 }
