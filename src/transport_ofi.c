@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <netdb.h>
+#include <rdma/fabric.h>
 
 #if HAVE_FNMATCH_H
 #include <fnmatch.h>
@@ -67,6 +68,7 @@ struct fid_av*                  shmem_transport_ofi_avfd;
 //struct fid_av*                  shmem_transport_ofi_coll_avfd;
 struct fid_av_set*              shmem_transport_ofi_avset;
 //struct fid_av_set_attr          shmem_transport_ofi_avset_attr;
+fi_addr_t                       shmem_transport_ofi_world_addr;
 struct fid_ep*                  shmem_transport_ofi_target_ep;
 struct fid_cq*                  shmem_transport_ofi_target_cq;
 struct fid_cq*                  shmem_transport_ofi_recv_cq;
@@ -1380,7 +1382,25 @@ int allocate_fabric_resources(struct fabric_info *info)
     };
 
     ret = fi_av_set(shmem_transport_ofi_avfd, &avset_attr, &shmem_transport_ofi_avset, NULL);
+    OFI_CHECK_RETURN_STR(ret, "AVSET creation failed");
 
+    ret = fi_av_set_addr(shmem_transport_ofi_avset, &shmem_transport_ofi_world_addr);
+    OFI_CHECK_RETURN_STR(ret, "Collective address fetch failed\n");
+
+
+    struct fi_eq_attr eq_attr = {
+        .wait_obj = FI_WAIT_UNSPEC
+    };
+
+    /* Event queue creation */
+    ret = fi_eq_open(shmem_transport_ofi_fabfd, &eq_attr, &(shmem_transport_ctx_default.eq), NULL);
+    OFI_CHECK_RETURN_STR(ret, "EQ creation failed\n");
+
+    ret = fi_domain_bind(shmem_transport_ofi_domainfd, &(shmem_transport_ctx_default.eq->fid), 0);
+    OFI_CHECK_RETURN_STR(ret, "Domain binding failed\n");
+    
+            
+ 
     return ret;
 }
 

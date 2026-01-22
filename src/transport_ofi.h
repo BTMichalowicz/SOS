@@ -98,10 +98,7 @@ struct shmem_transport_ctx_t {
     struct shmem_internal_tid       tid;
     struct shmem_internal_team_t   *team;
     /* Start Ben items */
-    struct fid_mc *mc;
-    int join_index;
-    int prov_errno;
-    int retval;
+    struct fid_eq*                  eq;
     /* End Ben items */
 };
 
@@ -112,8 +109,6 @@ extern struct fid_ep* shmem_transport_ofi_target_ep;
 extern struct fid_av* shmem_transport_ofi_avfd;
 //extern struct fid_av_set_attr shmem_transport_ofi_avset_attr;
 extern struct fid_av_set* shmem_transport_ofi_avset;
-
-
 
 
 /* Libfabric shenanignas */
@@ -159,6 +154,9 @@ static void cq_wait(shmem_transport_ctx_t *ctx, void *pcontext){
             break;
     } while(true);
 }
+
+extern fi_addr_t shmem_transport_ofi_world_addr;
+
 
 
 /* End libfabric shenanigans */
@@ -428,6 +426,36 @@ struct shmem_transport_ofi_bounce_buffer_t {
     shmem_transport_ofi_frag_t frag;
     uint8_t data[];
 };
+static int wait_for_join(shmem_transport_ctx_t *ctx, uint32_t signal, void *context){
+    int err;
+    uint32_t event;
+    struct fi_cq_err_entry comp = {};
+    struct fi_eq_entry entry;
+
+    do {
+        err = fi_eq_read(ctx->eq, &event, &entry, sizeof(entry), 0);
+        if (err >= 0){
+            if (event == signal){
+                if (context == NULL || (entry.context == context)){
+                    return FI_SUCCESS;
+                } else if (context != NULL){
+                    return -FI_EOTHER;
+                }
+            }
+        } else if (err != -FI_EAGAIN) {
+            return err;
+        }
+
+        err = fi_cq_read(ctx->cq, &comp, 1);
+        if (err < 0 && err != -FI_EAGAIN){
+            return err;
+        }
+    } while (err == -FI_EAGAIN);
+
+    return err;
+}
+
+
 
 
 static inline void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
@@ -440,14 +468,16 @@ static inline void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE
     fi_addr_t coll_addr = {};
     struct fid_mc *coll_mc;
 
-    ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL, shmem_transport_ofi_avset, 0L, &coll_mc, ctx);
-
+    ret = fi_join_collective(ep, shmem_transport_ofi_world_addr, shmem_transport_ofi_avset, 0L, &coll_mc, &context);
 
         //simple_join(ep, ctx, addr_table, shmem_transport_ofi_info.npes, &setary, &joinlist);
     
     if (ret != FI_SUCCESS){
+        fprintf(stderr, "Unable to join collective\n");
         goto quit;
     }
+
+    wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
 
 //    mc = get_single_mc(ctx, &joinlist);
     coll_addr = fi_mc_addr(coll_mc);
@@ -456,6 +486,7 @@ static inline void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE
     if (ret == FI_SUCCESS){
         cq_wait(ctx, &context); /* TODO Implement */
     }else{
+        fprintf(stderr, "Unable to barrier\n");
         goto quit;
     }
 

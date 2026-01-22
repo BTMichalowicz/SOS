@@ -438,6 +438,17 @@ shmem_internal_sync_dissem(int PE_start, int PE_stride, int PE_size, long *pSync
  * BROADCAST
  *
  *****************************************/
+
+
+void
+shmem_internal_bcast_hw_accel(void *target, const void *source, size_t len,
+                            int PE_root, int PE_start, int PE_stride, int PE_size,
+                            long *pSync, int complete)
+{
+    return;
+
+}
+
 void
 shmem_internal_bcast_linear(void *target, const void *source, size_t len,
                             int PE_root, int PE_start, int PE_stride, int PE_size,
@@ -591,6 +602,18 @@ shmem_internal_bcast_tree(void *target, const void *source, size_t len,
  * REDUCTION
  *
  *****************************************/
+void
+shmem_internal_op_to_all_hw_accel(void *target, const void *source, size_t count, size_t type_size,
+                                int PE_start, int PE_stride, int PE_size,
+                                void *pWrk, long *pSync,
+                                shm_internal_op_t op, shm_internal_datatype_t datatype)
+{
+    return;
+}
+
+
+
+
 void
 shmem_internal_op_to_all_linear(void *target, const void *source, size_t count, size_t type_size,
                                 int PE_start, int PE_stride, int PE_size,
