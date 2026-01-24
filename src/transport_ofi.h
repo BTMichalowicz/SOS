@@ -52,8 +52,17 @@ static inline double getwtime(void) {
         ((type *) ((char *) ptr - offsetof(type, field)))
 #endif
 
-
-
+#ifndef PRINT_DEBUG
+#define PRINT_DEBUG(fmt, args...)                               \
+    do {                                                        \
+        fflush(stdout);                                         \
+        fflush(stderr);                                         \
+        fprintf(stderr, "[rank_%d][%s][%s:%d] "fmt,             \
+                        shmem_internal_my_pe,                   \
+                        __FILE__, __func__, __LINE__,           \
+                        ##args);                                \
+    } while(0);
+#endif
 
 typedef struct shmem_transport_ofi_bounce_buffer_t shmem_transport_ofi_bounce_buffer_t;
 
@@ -70,6 +79,26 @@ struct shmem_internal_tid
     } val;
 };
 
+extern struct fid_ep* shmem_transport_ofi_target_ep;
+extern struct fid_av* shmem_transport_ofi_avfd;
+//extern struct fid_av_set_attr shmem_transport_ofi_avset_attr;
+extern struct fid_av_set* shmem_transport_ofi_avset;
+
+
+/* Libfabric shenanignas */
+
+typedef union nic_addr {
+    uint64_t value;
+    struct {
+        uint64_t nic_addr:20;
+        uint64_t net_route:28;
+        uint64_t nic_count:2;
+        uint64_t rank:14;
+    } __attribute__((__packed__));
+} nic_addr_t;
+#define NICSIZE (sizeof(union nicaddr))
+
+#define nodename_len 128
 
 
 struct shmem_transport_ctx_t {
@@ -99,20 +128,32 @@ struct shmem_transport_ctx_t {
     struct shmem_internal_team_t   *team;
     /* Start Ben items */
     struct fid_eq*                  eq;
+    int nics_per_rank; /* PMI_NUM_HSNS */
+    const char *nodename; /* SLURMD_NODENAME */
+    const char *unique_secret; /* PMI_SHARED_SECRET */
+    const char *jobid; /* FI_CXI_COLL_JOB_ID or SLURM_JOBID */
+    const char *jobstep; /* FI_CXI_COLL_JOB_STEP_ID */
+    const char *mcast_token; /* FI_CXI_COLL_MCAST_TOKEN */
+    const char *fab_mgr_url; /* FI_CXI_COLL_FABRIC_MGR_URL */
+    char node_0[nodename_len]; /* First name in SLURMD_NODELIST */
+    int addrs_per_job;
+    nic_addr_t *NIC_array;
+    int num_nics;
     /* End Ben items */
 };
 
 typedef struct shmem_transport_ctx_t shmem_transport_ctx_t;
 extern shmem_transport_ctx_t shmem_transport_ctx_default;
 
-extern struct fid_ep* shmem_transport_ofi_target_ep;
-extern struct fid_av* shmem_transport_ofi_avfd;
-//extern struct fid_av_set_attr shmem_transport_ofi_avset_attr;
-extern struct fid_av_set* shmem_transport_ofi_avset;
-
-
-/* Libfabric shenanignas */
-
+#define NODENAME "SLURMD_NODENAME"
+#define JOBID "FI_CXI_JOB_ID"
+#define JOBSTEP "FI_CXI_COLL_JOB_STEP_ID"
+#define MGR_URL "FI_CXI_COLL_FABRIC_MGR_URL"
+#define MCAST_TOKEN "FI_CXI_COLL_MCAST_TOKEN"
+#define ADDRS_PER_JOB "FI_CXI_HWCOLL_ADDRS_PER_JOB"
+#define MIN_NODES "FI_CXI_HWCOLL_MIN_NODES"
+#define NODELIST "SLURM_NODELIST"
+#define NICS_PER_RANK "PMI_NUM_HSNS"
 
 
 /* TODO: Currently applies ONLY to libfabrics implementations
@@ -156,6 +197,7 @@ static void cq_wait(shmem_transport_ctx_t *ctx, void *pcontext){
 }
 
 extern fi_addr_t shmem_transport_ofi_world_addr;
+extern fi_addr_t shmem_transport_ofi_coll_addr;
 
 
 
@@ -468,14 +510,16 @@ static inline void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE
     fi_addr_t coll_addr = {};
     struct fid_mc *coll_mc;
 
+    PRINT_DEBUG("About to join collective, avset %p\n", shmem_transport_ofi_avset);
     ret = fi_join_collective(ep, shmem_transport_ofi_world_addr, shmem_transport_ofi_avset, 0L, &coll_mc, &context);
 
         //simple_join(ep, ctx, addr_table, shmem_transport_ofi_info.npes, &setary, &joinlist);
     
-    if (ret != FI_SUCCESS){
-        fprintf(stderr, "Unable to join collective\n");
-        goto quit;
-    }
+    OFI_CHECK_ERROR_MSG(ret, "Unable to join collective\n");
+//    if (ret != FI_SUCCESS){
+//        fprintf(stderr, "Unable to join collective\n");
+//        goto quit;
+//    }
 
     wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
 

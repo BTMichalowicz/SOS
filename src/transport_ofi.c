@@ -69,6 +69,7 @@ struct fid_av*                  shmem_transport_ofi_avfd;
 struct fid_av_set*              shmem_transport_ofi_avset;
 //struct fid_av_set_attr          shmem_transport_ofi_avset_attr;
 fi_addr_t                       shmem_transport_ofi_world_addr;
+fi_addr_t                       shmem_transport_ofi_coll_addr;
 struct fid_ep*                  shmem_transport_ofi_target_ep;
 struct fid_cq*                  shmem_transport_ofi_target_cq;
 struct fid_cq*                  shmem_transport_ofi_recv_cq;
@@ -133,6 +134,11 @@ int shmem_transport_ofi_single_ep;
 #define SHM_INTERNAL_UINT16 FI_UINT16
 #define SHM_INTERNAL_UINT32 FI_UINT32
 #define SHM_INTERNAL_UINT64 FI_UINT64
+
+
+
+
+
 
 int shmem_transport_dtype_table[] = {
     FI_INT8,                  /* SHM_INTERNAL_SIGNED_BYTE    */
@@ -1383,10 +1389,13 @@ int allocate_fabric_resources(struct fabric_info *info)
 
     ret = fi_av_set(shmem_transport_ofi_avfd, &avset_attr, &shmem_transport_ofi_avset, NULL);
     OFI_CHECK_RETURN_STR(ret, "AVSET creation failed");
+    PRINT_DEBUG("shmem_transport_ofi_avset done %p\n", shmem_transport_ofi_avset);
+
 
     ret = fi_av_set_addr(shmem_transport_ofi_avset, &shmem_transport_ofi_world_addr);
     OFI_CHECK_RETURN_STR(ret, "Collective address fetch failed\n");
-
+    PRINT_DEBUG("shmem_transport_ofi_world_addr done \n");
+ 
 
     struct fi_eq_attr eq_attr = {
         .wait_obj = FI_WAIT_UNSPEC
@@ -1857,6 +1866,41 @@ static int shmem_transport_ofi_ctx_init(shmem_transport_ctx_t *ctx, int id)
         ctx->options &= ~SHMEMX_CTX_BOUNCE_BUFFER;
         ctx->bounce_buffers = NULL;
     }
+
+    /* Setting up framework and environment */
+
+    ctx->nodename = getenv(NODENAME);
+    ctx->jobid = getenv(JOBID);
+    ctx->jobstep = getenv(JOBSTEP);
+    ctx->fab_mgr_url = getenv(MGR_URL);
+    ctx->mcast_token = getenv(MCAST_TOKEN);
+    ctx->addrs_per_job = getenv(ADDRS_PER_JOB) == NULL ? 1 : atoi(getenv(ADDRS_PER_JOB));
+    char *s, *d;
+    s = getenv(NODELIST);
+    d = (char *)ctx->node_0;
+
+    int count = 0;
+    while(s && *s && *s != ',') {
+        if (*s == '['){
+            s++;
+            while( *s != '-' && *s != ']' && *s != ','){
+                count++;
+                *d++ = *s++;
+            }
+            break;
+        }
+        *d++ = *s++;
+        count++;
+    }
+    *d = 0;
+    d -=count ;
+    for (int i = 0; i < count; i++){
+        ctx->node_0[i] = d[i];
+    }
+
+    ctx->nics_per_rank = getenv(NICS_PER_RANK) == NULL ? 1 : atoi(getenv(NICS_PER_RANK));
+    if (ctx->nics_per_rank < 1) 
+        ctx->nics_per_rank = 1;
 
     return 0;
 }
