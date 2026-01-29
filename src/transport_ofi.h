@@ -96,9 +96,10 @@ typedef union nic_addr {
         uint64_t rank:14;
     } __attribute__((__packed__));
 } nic_addr_t;
-#define NICSIZE (sizeof(union nicaddr))
+#define NICSIZE (sizeof(union nic_addr))
 
 #define nodename_len 128
+#define nicname_len 256
 
 
 struct shmem_transport_ctx_t {
@@ -161,6 +162,7 @@ extern shmem_transport_ctx_t shmem_transport_ctx_default;
  */
 
 
+int shmem_collective_nic_initialization(void);
 
 
 static void *cq_poll(shmem_transport_ctx_t *ctx, void *pcontext){

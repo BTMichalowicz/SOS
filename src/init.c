@@ -520,6 +520,9 @@ shmem_internal_heap_postinit(void)
     atexit(shmem_internal_shutdown_atexit);
     shmem_internal_initialized = 1;
 
+    ret = shmem_collective_nic_initialization();
+        
+
     /* finish up */
 #ifndef USE_PMIX
     shmem_runtime_barrier();

@@ -1323,6 +1323,106 @@ int populate_av(void)
     return 0;
 }
 
+
+
+static int _compare(const void *v1, const void *v2)
+{
+    uint64_t *a1 = (uint64_t *)v1;
+    uint64_t *a2 = (uint64_t *)v2;
+
+    if (*a1 < *a2)
+        return -1;
+    if (*a1 > *a2)
+        return 1;
+    return 0;
+}
+
+static void get_local_nic(shmem_transport_ctx_t *ctx, int hsn, nic_addr_t *nic){
+    char fname[nicname_len];
+    char text[nicname_len];
+    char *ptr = NULL;
+    FILE *fid = NULL;
+    int i = 0, n = 0;
+
+    /* 6 bytes --> length of 6 below as a magic number */
+    strcpy(text, "FF:FF:FF:FF:FF:FF\n");
+    snprintf(fname, sizeof(fname), "/sys/class/net/hsn%d/address", hsn);
+
+    if ((fid = fopen(fname, "r"))) {
+        n = fread(text, 1, sizeof(text), fid);
+        fclose(fid);
+        text[n] = 0; /* NULL termination is important */
+    }
+
+    nic->value = 0L;
+    ptr = text;
+    for (i = 0; i< 6; i++){
+        nic->value <<= 8;
+        nic->value |= strtol(ptr, &ptr, 16);
+        ptr++;
+    }
+
+    nic->nic_count = hsn;
+    nic->rank = shmem_internal_my_pe;
+}
+
+
+int shmem_collective_nic_initialization(void){
+
+    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
+    int err = FI_SUCCESS, i = 0, local_size = 0;
+    fi_addr_t *fi_addrs = NULL;
+    local_size = ctx->num_nics * NICSIZE;
+    if (ctx->NIC_array){
+        return FI_SUCCESS;
+    }
+
+    ctx->NIC_array = calloc(shmem_internal_num_pes, local_size);
+    if (ctx->NIC_array == NULL){
+        err = -FI_ENOMEM;
+        goto fail;
+    }
+    nic_addr_t *local_nics = calloc(1, local_size);
+    if (local_nics == NULL){
+        err = -FI_ENOMEM;
+        goto fail;
+    }
+
+    for (i = 0 ; i < ctx->nics_per_rank; i++){
+        get_local_nic(ctx, i, &local_nics[i]);
+    }
+    /* TODO: ALSO need to allocate everything on the shared heap
+     * Theoretically doable HERE since internal heap has been set up
+     * already
+     */
+
+    nic_addr_t *shmem_nics = shmem_malloc(shmem_internal_num_pes * local_size);
+    nic_addr_t *shmem_nics_2 = shmem_malloc(1 * local_size);
+    memcpy(local_nics, shmem_nics_2, local_size*ctx->nics_per_rank);
+    shmem_fcollectmem(SHMEM_TEAM_WORLD, shmem_nics, shmem_nics_2, local_size); 
+
+    memcpy(ctx->NIC_array, shmem_nics, local_size*shmem_internal_num_pes);
+    shmem_free(shmem_nics_2);
+    shmem_free(shmem_nics);
+    shmem_nics_2 = NULL;
+    shmem_nics = NULL;
+    /* TODO: Use an internal algorithm to set up the addresses per NIC address *!!!! */
+
+    ctx->num_nics = shmem_internal_num_pes * ctx->nics_per_rank;
+    qsort(ctx->NIC_array, ctx->num_nics, NICSIZE, _compare);
+
+    return err;
+
+
+
+
+fail:
+    ctx->num_nics = 0;
+    if (ctx->NIC_array) free(ctx->NIC_array);
+    if (local_nics) free(local_nics);
+    return err;
+}
+
 static inline
 int allocate_fabric_resources(struct fabric_info *info)
 {
