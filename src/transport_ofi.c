@@ -67,6 +67,7 @@ struct fid_domain*              shmem_transport_ofi_domainfd;
 struct fid_av*                  shmem_transport_ofi_avfd;
 //struct fid_av*                  shmem_transport_ofi_coll_avfd;
 struct fid_av_set*              shmem_transport_ofi_avset;
+struct fid_mc                   *coll_mc = NULL;
 //struct fid_av_set_attr          shmem_transport_ofi_avset_attr;
 fi_addr_t                       shmem_transport_ofi_world_addr;
 fi_addr_t                       shmem_transport_ofi_coll_addr;
@@ -1286,6 +1287,36 @@ int publish_av_info(struct fabric_info *info)
     return ret;
 }
 
+int wait_for_join(shmem_transport_ctx_t *ctx, uint32_t signal, void *context){
+    int err;
+    uint32_t event;
+    struct fi_cq_err_entry comp = {};
+    struct fi_eq_entry entry;
+
+    do {
+        err = fi_eq_read(ctx->eq, &event, &entry, sizeof(entry), 0);
+        if (err >= 0){
+            if (event == signal){
+                if (context == NULL || (entry.context == context)){
+                    return FI_SUCCESS;
+                } else if (context != NULL){
+                    return -FI_EOTHER;
+                }
+            }
+        } else if (err != -FI_EAGAIN) {
+            return err;
+        }
+
+        err = fi_cq_read(ctx->cq, &comp, 1);
+        if (err < 0 && err != -FI_EAGAIN){
+            return err;
+        }
+    } while (err == -FI_EAGAIN);
+
+    return err;
+}
+
+
 static inline
 int populate_av(void)
 {
@@ -1306,6 +1337,7 @@ int populate_av(void)
         }
     }
 
+    PRINT_DEBUG("fi_av_insert time!\n");
     ret = fi_av_insert(shmem_transport_ofi_avfd,
                        alladdrs,
                        shmem_internal_num_pes,
@@ -1316,9 +1348,68 @@ int populate_av(void)
         RAISE_WARN_STR("av insert failed");
         return ret;
     }
+    PRINT_DEBUG("av insert succeeded\n");
 
 
     free(alladdrs);
+
+
+    struct cxip_comm_key comm_key = {
+        .keytype = COMM_KEY_UNICAST,
+        .ucast.mcast_addr = 0,
+        .ucast.hwroot_idx = 0
+    };
+
+    struct fi_av_set_attr avset_attr = {
+        .count = 0,
+        .start_addr = FI_ADDR_NOTAVAIL,
+        .end_addr = FI_ADDR_NOTAVAIL,
+        .stride = 1,
+        .comm_key_size = sizeof(comm_key),
+        .comm_key = (void *)&comm_key,
+        .flags = 0,
+    };
+
+    ret = fi_av_set(shmem_transport_ofi_avfd, &avset_attr, &shmem_transport_ofi_avset, NULL);
+    OFI_CHECK_RETURN_STR(ret, "AVSET creation failed");
+    PRINT_DEBUG("shmem_transport_ofi_avset done %p\n", shmem_transport_ofi_avset);
+
+  //  shmem_barrier_all();
+    for (i = 0; i< shmem_internal_num_pes; i++){
+        PRINT_DEBUG("Inserting at index %d (addr_table[%d] = 0x%lx) for avset %p\n", i, i, addr_table[i], shmem_transport_ofi_avset);
+        ret = fi_av_set_insert(shmem_transport_ofi_avset, addr_table[i]);
+        OFI_CHECK_RETURN_STR(ret, "av_set_insert failed\n");
+    }
+
+    ret = fi_av_set_addr(shmem_transport_ofi_avset, &shmem_transport_ofi_world_addr);
+    OFI_CHECK_RETURN_STR(ret, "Collective address fetch failed\n");
+    PRINT_DEBUG("shmem_transport_ofi_world_addr done 0x%lx \n", shmem_transport_ofi_world_addr);
+ 
+
+    struct fi_eq_attr eq_attr = {
+        .wait_obj = FI_WAIT_UNSPEC
+    };
+
+    /* Event queue creation */
+    ret = fi_eq_open(shmem_transport_ofi_fabfd, &eq_attr, &(shmem_transport_ctx_default.eq), NULL);
+    OFI_CHECK_RETURN_STR(ret, "EQ creation failed\n");
+
+    ret = fi_domain_bind(shmem_transport_ofi_domainfd, &(shmem_transport_ctx_default.eq->fid), 0);
+    OFI_CHECK_RETURN_STR(ret, "Domain binding failed\n");
+    
+    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
+    struct fid_ep *ep = ctx->ep;
+
+    
+   PRINT_DEBUG("About to join collective, avset %p address 0x%lx\n", shmem_transport_ofi_avset, shmem_transport_ofi_world_addr);
+
+    uint64_t context = 0;
+
+    ret = fi_join_collective(ep, shmem_transport_ofi_world_addr, shmem_transport_ofi_avset, 0L, &coll_mc, &context);
+    OFI_CHECK_ERROR_MSG(ret, "Unable to join collective\n");
+
+    
+    wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
 
     return 0;
 }
@@ -1414,8 +1505,6 @@ int shmem_collective_nic_initialization(void){
     return err;
 
 
-
-
 fail:
     ctx->num_nics = 0;
     if (ctx->NIC_array) free(ctx->NIC_array);
@@ -1470,45 +1559,6 @@ int allocate_fabric_resources(struct fabric_info *info)
                      &shmem_transport_ofi_avfd,
                      NULL);
     OFI_CHECK_RETURN_STR(ret, "AV creation failed");
-
-    struct cxip_comm_key comm_key = {
-        .keytype = COMM_KEY_UNICAST,
-        .ucast.mcast_addr = 0,
-        .ucast.hwroot_idx = 0
-    };
-
-    struct fi_av_set_attr avset_attr = {
-        .count = 0,
-        .start_addr = FI_ADDR_NOTAVAIL,
-        .end_addr = FI_ADDR_NOTAVAIL,
-        .stride = 1,
-        .comm_key_size = sizeof(comm_key),
-        .comm_key = (void *)&comm_key,
-        .flags = 0,
-    };
-
-    ret = fi_av_set(shmem_transport_ofi_avfd, &avset_attr, &shmem_transport_ofi_avset, NULL);
-    OFI_CHECK_RETURN_STR(ret, "AVSET creation failed");
-    PRINT_DEBUG("shmem_transport_ofi_avset done %p\n", shmem_transport_ofi_avset);
-
-
-    ret = fi_av_set_addr(shmem_transport_ofi_avset, &shmem_transport_ofi_world_addr);
-    OFI_CHECK_RETURN_STR(ret, "Collective address fetch failed\n");
-    PRINT_DEBUG("shmem_transport_ofi_world_addr done \n");
- 
-
-    struct fi_eq_attr eq_attr = {
-        .wait_obj = FI_WAIT_UNSPEC
-    };
-
-    /* Event queue creation */
-    ret = fi_eq_open(shmem_transport_ofi_fabfd, &eq_attr, &(shmem_transport_ctx_default.eq), NULL);
-    OFI_CHECK_RETURN_STR(ret, "EQ creation failed\n");
-
-    ret = fi_domain_bind(shmem_transport_ofi_domainfd, &(shmem_transport_ctx_default.eq->fid), 0);
-    OFI_CHECK_RETURN_STR(ret, "Domain binding failed\n");
-    
-            
  
     return ret;
 }
