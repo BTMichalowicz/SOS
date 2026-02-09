@@ -440,6 +440,84 @@ quit:
     return ret;
 }
 
+static int eq_poll(shmem_transport_ctx_t *ctx){
+    int ret = 0;
+    struct fid_eq *eq;
+    struct fi_eq_err_entry eqd = {};
+    join_item_t *jctx = NULL;
+    uint32_t event = 0;
+
+    eq = ctx->eq;
+    struct fid_ep *ep = ctx->ep;
+
+    jctx = NULL;
+    ret = fi_eq_read(eq, &event, &eqd, sizeof(eqd), 0);
+    if (ret == -FI_EAGAIN){
+        return -FI_EAGAIN;
+    }
+
+    if (ret >= 0){
+        if (ret < sizeof(struct fi_eq_entry)) { 
+            PRINT_ERROR("Too small: %d versus %lu\n",
+                    ret, sizeof(struct fi_eq_entry));
+            return -FI_EINVAL;
+        }
+        if ( (!eqd.context) || (event != FI_JOIN_COMPLETE)){
+            PRINT_ERROR("Unexpected eqd response\n");
+            return -FI_EINVAL;
+        }
+        jctx = eqd.context;
+        jctx->retval = 0;
+        jctx->prov_errno = 0;
+        return FI_SUCCESS;
+    }
+    if (ret == -FI_EAVAIL){
+        ret = fi_eq_readerr(eq, &eqd, 0);
+        if (ret < sizeof(struct fi_eq_entry)) { 
+            PRINT_ERROR("Too small: %d versus %lu\n",
+                    ret, sizeof(struct fi_eq_entry));
+            return -FI_EINVAL;
+        }
+
+        if (!eqd.context){
+            PRINT_ERROR("Unexpected eqd response\n");
+            return -FI_EINVAL;
+        } 
+
+        jctx = eqd.context;
+        jctx->retval = eqd.err;
+        jctx->prov_errno = eqd.prov_errno;
+        return FI_SUCCESS;
+    }
+    return FI_SUCCESS;
+}
+static void *cq_poll(shmem_transport_ctx_t *ctx, void *pcontext){
+    struct fi_cq_err_entry cq_err = {};
+    ssize_t size = 0;
+
+    /* Poll once instead of polling per operation */
+    size = fi_cq_read(ctx->cq, &cq_err, 1);
+    if (size == -FI_EAVAIL)
+        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
+    if (size > 0)
+        return cq_err.op_context;
+//    if (size > 0){
+        /* Event seen! */
+//    } else if (size != -FI_EAGAIN){
+        /* ERROR seen -- wait do we really need these bits? */
+//    }
+
+    size = fi_cq_read(ctx->cq, &cq_err, 1);
+    if (size == -FI_EAVAIL)
+        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
+    if (size > 0)
+        return cq_err.op_context; 
+    return NULL;
+}
+
+
+
+
 static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary, struct d_entry *joinlist,
         int limit)
 {
@@ -475,10 +553,19 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
             free(jctx);
             goto fail;
         }
-
+        do {
+            cq_poll(ctx, jctx); //poll_cqs();
+            ret = eq_poll(ctx);
+        } while (ret == -FI_EAGAIN);
+        if (ret < 0) {
+            PRINT_ERROR("join %d FAILED eq poll %d\n", i, ret);
+            free(jctx);
+            goto fail;
+        }
         d_insert_tail(&jctx->entry, joinlist);
         count++;
     }
+
     PRINT_ERROR("DONE %s completed %d joins\n", __func__, count);
     return FI_SUCCESS;
 
@@ -531,8 +618,6 @@ static struct join_item *coll_single_join(shmem_transport_ctx_t *ctx, fi_addr_t 
 quit:
     return NULL;
 }
-
-
 
 static int _simple_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
         struct avset_ary *setary,
@@ -592,31 +677,7 @@ static uint64_t _simple_get_mc(struct d_entry *joinlist)
 int shmem_collective_nic_initialization(void);
 
 
-static void *cq_poll(shmem_transport_ctx_t *ctx, void *pcontext){
-    struct fi_cq_err_entry cq_err = {};
-    ssize_t size = 0;
 
-    /* Poll once instead of polling per operation */
-    size = fi_cq_read(ctx->cq, &cq_err, 1);
-    if (size == -FI_EAVAIL)
-        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
-    if (size > 0)
-        return cq_err.op_context;
-//    if (size > 0){
-        /* Event seen! */
-//    } else if (size != -FI_EAGAIN){
-        /* ERROR seen -- wait do we really need these bits? */
-//    }
-
-    size = fi_cq_read(ctx->cq, &cq_err, 1);
-    if (size == -FI_EAVAIL)
-        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
-    if (size > 0)
-        return cq_err.op_context;
-
-    
-    return NULL;
-}
 
 static void cq_wait(shmem_transport_ctx_t *ctx, void *pcontext){
     do {

@@ -1579,6 +1579,11 @@ int shmem_collective_nic_initialization(void){
 
     PRINT_DEBUG("Finished here. Performing a joining of collectives and avset configuration\n");
 
+    return err;
+
+
+take_2:    
+
    struct cxip_comm_key comm_key = {
         .keytype = COMM_KEY_UNICAST,
         .ucast.mcast_addr = 0,
