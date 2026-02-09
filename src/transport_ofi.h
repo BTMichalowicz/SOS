@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/uio.h>
+#include <stdbool.h>
 #include <rdma/fabric.h>
 #include <rdma/fi_errno.h>
 #include <rdma/fi_domain.h>
@@ -62,7 +63,19 @@ static inline double getwtime(void) {
                         __FILE__, __func__, __LINE__,           \
                         ##args);                                \
     } while(0);
-#endif
+#endif /* PRINT_DEBUG */
+
+#ifndef PRINT_ERROR
+#define PRINT_ERROR(fmt, args...)                               \
+    do {                                                        \
+        fflush(stdout);                                         \
+        fflush(stderr);                                         \
+        fprintf(stderr, "[rank_%d][%s][%s:%d][ERROR] "fmt,             \
+                        shmem_internal_my_pe,                   \
+                        __FILE__, __func__, __LINE__,           \
+                        ##args);                                \
+    } while(0);
+#endif /* PRINT_ERROR */
 
 typedef struct shmem_transport_ofi_bounce_buffer_t shmem_transport_ofi_bounce_buffer_t;
 
@@ -85,8 +98,18 @@ extern struct fid_av* shmem_transport_ofi_avfd;
 //extern struct fid_av_set_attr shmem_transport_ofi_avset_attr;
 extern struct fid_av_set* shmem_transport_ofi_avset;
 
-
 /* Libfabric shenanignas */
+
+
+extern struct fid_fabric*              shmem_transport_ofi_CXI_fabfd;
+extern struct fid_domain*              shmem_transport_ofi_CXI_domain_fd;
+extern struct fid_av*                  shmem_transport_ofi_CXI_avfd;
+extern struct fid_av_set*              shmem_transport_ofi_CXI_avfd_set;
+extern fi_addr_t                       shmem_transport_ofi_CXI_world_addr;
+extern fi_addr_t                       shmem_transport_ofi_CXI_coll_addr;
+extern fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
+
+
 
 typedef union nic_addr {
     uint64_t value;
@@ -97,6 +120,8 @@ typedef union nic_addr {
         uint64_t rank:14;
     } __attribute__((__packed__));
 } nic_addr_t;
+
+
 #define NICSIZE (sizeof(union nic_addr))
 
 #define nodename_len 128
@@ -144,8 +169,407 @@ struct shmem_transport_ctx_t {
     /* End Ben items */
 };
 
+
 typedef struct shmem_transport_ctx_t shmem_transport_ctx_t;
 extern shmem_transport_ctx_t shmem_transport_ctx_default;
+/* Some things taken directly from cxip.h to replicate what exactly is going
+ * on/what should be going on */
+
+#define MAX_BITS 9
+#define NIC_BITS 3
+#define PAD 3
+
+typedef struct internal_addr {
+    uint32_t pid:MAX_BITS;
+    uint32_t nic:NIC_BITS;
+    uint32_t pad:PAD;
+    uint16_t vni;
+} internal_addr_t;
+
+extern internal_addr_t myaddr; 
+
+enum shmem_ofi_list_end {
+    SHMEM_LIST_TAIL,
+    SHMEM_LIST_HEAD
+};
+
+typedef struct d_entry {
+    struct d_entry  *next;
+    struct d_entry  *prev;
+}d_entry_t;
+
+
+#define DLIST_INIT(addr) { addr, addr }
+#define DEFINE_LIST(name) struct d_entry name = DLIST_INIT(&name)
+
+static inline void d_init(struct d_entry *head)
+{
+        head->next = head;
+            head->prev = head;
+}
+
+static inline int d_empty(struct d_entry *head)
+{
+        return head->next == head;
+}
+
+
+static inline void
+d_insert_after(struct d_entry *item, struct d_entry *head)
+{
+        item->next = head->next;
+            item->prev = head;
+                head->next->prev = item;
+                    head->next = item;
+}
+
+static inline void
+d_insert_before(struct d_entry *item, struct d_entry *head)
+{
+        d_insert_after(item, head->prev);
+}
+
+#define d_insert_head d_insert_after
+#define d_insert_tail d_insert_before
+
+
+static inline void d_remove(struct d_entry *item)
+{
+    item->prev->next = item->next;
+    item->next->prev = item->prev;
+}
+
+static inline void d_remove_init(struct d_entry *item)
+{
+    d_remove(item);
+    d_init(item);
+}
+
+#define d_first_entry_or_null(head, type, member) ({    \
+        struct d_entry *pos = (head)->next;             \
+        pos != (head) ? container_of((pos), type, member) : NULL;   \
+        })
+
+#define d_pop_front(head, type, container, member)          \
+    do {                                \
+        container = container_of((head)->next, type, member);   \
+        d_remove((head)->next);             \
+    } while (0)
+
+#define d_foreach(head, item)                       \
+    for ((item) = (head)->next; (item) != (head); (item) = (item)->next)
+
+#define d_foreach_reverse(head, item)                   \
+    for ((item) = (head)->prev; (item) != (head); (item) = (item)->prev)
+
+#define d_foreach_container(head, type, container, member)          \
+    for ((container) = container_of((head)->next, type, member);        \
+            &((container)->member) != (head);                  \
+            (container) = container_of((container)->member.next,       \
+                type, member))
+
+#define d_foreach_container_reverse(head, type, container, member)      \
+    for ((container) = container_of((head)->prev, type, member);        \
+            &((container)->member) != (head);                  \
+            (container) = container_of((container)->member.prev,       \
+                type, member))
+
+#define d_foreach_container_reverse_safe(head, type, container, member, tmp)\
+    for ((container) = container_of((head)->prev, type, member),        \
+            (tmp) = (container)->member.prev;                  \
+            &((container)->member) != (head);                  \
+            (container) = container_of((tmp), type, member),           \
+            (tmp) = (container)->member.prev)
+
+typedef int d_func_t(struct d_entry *item, const void *arg);
+
+    static inline int
+d_match_func_same_entry(struct d_entry *item,
+        const void *arg)
+{
+    return item == arg;
+}
+
+    static inline struct d_entry *
+d_find_first_match(struct d_entry *head, d_func_t *match,
+        const void *arg)
+{
+    struct d_entry *item;
+
+    d_foreach(head, item) {
+        if (match(item, arg))
+            return item;
+    }
+
+    return NULL;
+}
+
+    static inline bool
+d_entry_in_list(struct d_entry *head,
+        struct d_entry *entry)
+{
+    if (d_find_first_match(head, &d_match_func_same_entry,
+                (void *) entry))
+        return true;
+
+    return false;
+}
+
+    static inline struct d_entry *
+d_remove_first_match(struct d_entry *head, d_func_t *match,
+        const void *arg)
+{
+    struct d_entry *item;
+
+    item = d_find_first_match(head, match, arg);
+    if (item)
+        d_remove(item);
+
+    return item;
+}
+
+static inline void d_insert_order(struct d_entry *head, d_func_t *order,
+        struct d_entry *entry)
+{
+    struct d_entry *item;
+
+    item = d_find_first_match(head, order, entry);
+    if (item)
+        d_insert_before(entry, item);
+    else
+        d_insert_tail(entry, head);
+}
+
+typedef struct join_item {
+    d_entry_t   entry;
+    struct fid_av_set *avset;
+    struct fid_mc     *mc;
+    int join_index;
+    int prov_errno;
+    int retval;
+} join_item_t;
+
+struct avset_ary {
+    struct fid_av_set **avset;
+    int avset_cnt;
+    int avset_siz;
+};
+
+static void avset_ary_init(struct avset_ary *setary)
+{
+    setary->avset = NULL;
+    setary->avset_cnt = 0;
+    setary->avset_siz = 0;
+}
+
+static void avset_ary_destroy(struct avset_ary *setary)
+{
+    int i;
+
+    if (setary->avset) {
+        for (i = 0; i < setary->avset_cnt; i++)
+            fi_close(&setary->avset[i]->fid);
+        free(setary->avset);
+    }
+    avset_ary_init(setary);
+}
+
+
+static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
+        int mcast_addr, int root_idx,
+        struct avset_ary *setary)
+{
+    struct cxip_comm_key comm_key = {
+        .keytype = COMM_KEY_UNICAST,
+        .ucast.mcast_addr = mcast_addr,
+        .ucast.hwroot_idx = root_idx
+    };
+    struct fi_av_set_attr attr = {
+        .count = 0,
+        .start_addr = FI_ADDR_NOTAVAIL,
+        .end_addr = FI_ADDR_NOTAVAIL,
+        .stride = 1,
+        .comm_key_size = sizeof(comm_key),
+        .comm_key = (void *)&comm_key,
+        .flags = 0,
+    };
+    struct fid_av_set *setp;
+    int i, ret;
+
+    if (setary->avset_siz <= setary->avset_cnt) {
+        void *ptr;
+        int siz;
+
+        PRINT_DEBUG("%s expand setary\n", __func__);
+        siz = setary->avset_siz + 4;
+        ptr = realloc(setary->avset, siz * sizeof(void *));
+        if (!ptr) {
+            PRINT_ERROR("%s realloc failed\n", __func__);
+            ret = -FI_ENOMEM;
+            goto quit;
+        }
+        setary->avset_siz = siz;
+        setary->avset = ptr;
+    }
+
+
+
+    ret = fi_av_set(shmem_transport_ofi_CXI_avfd, &attr, &setp, NULL);
+    if (ret) {
+        PRINT_ERROR("%s fi_av_set failed %d\n", __func__, ret);
+        goto quit;
+    }
+
+    for (i = 0; i < size; i++) {
+        ret = fi_av_set_insert(setp, fiaddrs[i]);
+        if (ret) {
+            PRINT_ERROR("%s fi_av_set_insert failed %d\n", __func__, ret);
+            goto quit;
+        }
+    }
+    // add to expanded list
+    setary->avset[setary->avset_cnt++] = setp;
+    return 0;
+
+quit:
+    PRINT_ERROR("%s: FAILED %d\n", __func__, ret);
+    if (setp) {
+        fi_close(&setp->fid);
+        free(setp);
+    }
+    return ret;
+}
+
+static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary, struct d_entry *joinlist,
+        int limit)
+{
+    struct join_item *jctx;
+    int i, ret, total, count;
+
+    PRINT_ERROR("ENTRY %s\n", __func__);
+
+
+    total = setary->avset_cnt;
+    count = 0;
+    for (i = 0; i < total; i++) {
+        jctx = calloc(1, sizeof(*jctx));
+        if (!jctx) {
+            PRINT_ERROR("calloc failed on jctx[%d]\n", i);
+            ret = -FI_ENOMEM;
+            goto fail;
+        }
+        d_init(&jctx->entry);
+        jctx->join_index = i;
+        jctx->avset = setary->avset[i];
+        PRINT_DEBUG("join %d of %d initiating\n", i, total);
+        struct fid_ep *ep = ctx->ep; 
+        ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
+                setary->avset[i], 0L, &jctx->mc, jctx);
+
+        if (ret == -FI_ECONNREFUSED) {
+            free(jctx);
+            continue;
+        }
+        if (ret != FI_SUCCESS) {
+            PRINT_ERROR("join %d FAILED join %d\n", i, ret);
+            free(jctx);
+            goto fail;
+        }
+
+        d_insert_tail(&jctx->entry, joinlist);
+        count++;
+    }
+    PRINT_ERROR("DONE %s completed %d joins\n", __func__, count);
+    return FI_SUCCESS;
+
+fail:
+    PRINT_ERROR("MULTIJOIN failed\n");
+    //coll_multi_release(joinlist);
+    return ret;
+}
+
+
+
+static struct join_item *coll_single_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
+        int mcast_addr, int root_idx,
+        int exp_retval, int exp_prov_errno,
+        struct avset_ary *setary,
+        struct d_entry *joinlist,
+        const char *msg)
+{
+    struct join_item *jctx = NULL;
+    int ret;
+
+    avset_ary_init(setary);
+    ret = avset_ary_append(fiaddrs, size, mcast_addr, root_idx, setary);
+    if (ret) {
+        PRINT_ERROR("%s JOIN avset_ary_append()=%d\n", msg, ret);
+        goto quit;
+    }
+
+    d_init(joinlist);
+    ret = coll_multi_join(ctx, setary, joinlist, -1);
+    if (ret < 0) {
+        PRINT_ERROR("%s JOIN coll_multi_join()=%d\n", msg, ret);
+        goto quit;
+    }
+
+    jctx = d_first_entry_or_null(joinlist, struct join_item, entry);
+    if (!jctx) {
+        PRINT_ERROR("%s JOIN produced NULL result\n", msg);
+        goto quit;
+    }
+
+    if (jctx->retval != exp_retval || jctx->prov_errno != exp_prov_errno) {
+        PRINT_ERROR("%s JOIN ret=%d,exp=%d prov_errno=%d,exp=%d\n", msg,
+                jctx->retval, exp_retval,
+                jctx->prov_errno, exp_prov_errno);
+        goto quit;
+    }
+
+    return jctx;
+quit:
+    return NULL;
+}
+
+
+
+static int _simple_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
+        struct avset_ary *setary,
+        struct d_entry *joinlist)
+{
+    int ret;
+
+    avset_ary_init(setary);
+    ret = avset_ary_append(fiaddrs, size, 0, 1, setary);
+    if (ret)
+        return ret;
+
+    d_init(joinlist);
+    ret = coll_multi_join(ctx, setary, joinlist, -1);
+    if (ret < 0)
+        return ret;
+
+    return 0;
+}
+
+static uint64_t _simple_get_mc(struct d_entry *joinlist)
+{
+    struct join_item *jctx;
+
+    jctx = d_first_entry_or_null(joinlist, struct join_item, entry);
+    if (jctx == NULL) {
+        PRINT_ERROR("Join item is NULL\n");
+        return 0;
+    }
+    return (uint64_t)jctx->mc;
+}
+
+
+
+
+/*End that direct steal */
+
 
 #define NODENAME "SLURMD_NODENAME"
 #define JOBID "FI_CXI_JOB_ID"
@@ -156,6 +580,8 @@ extern shmem_transport_ctx_t shmem_transport_ctx_default;
 #define MIN_NODES "FI_CXI_HWCOLL_MIN_NODES"
 #define NODELIST "SLURM_NODELIST"
 #define NICS_PER_RANK "PMI_NUM_HSNS"
+
+
 
 
 /* TODO: Currently applies ONLY to libfabrics implementations
