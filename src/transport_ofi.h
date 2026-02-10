@@ -349,11 +349,11 @@ typedef struct join_item {
     int retval;
 } join_item_t;
 
-struct avset_ary {
+typedef struct avset_ary {
     struct fid_av_set **avset;
     int avset_cnt;
     int avset_siz;
-};
+} avset_ary_t;
 
 static void avset_ary_init(struct avset_ary *setary)
 {
@@ -963,17 +963,26 @@ int wait_for_join(shmem_transport_ctx_t *ctx, uint32_t signal, void *context);
 
 
 static inline void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
+    
+    avset_ary_t setary;
+    d_entry_t join_list;
+    uint64_t context;
+    uint64_t mc;
+    int i = 0, ret = 0;
 
-    uint64_t context = 0;
-    int ret  = 0;
+    ret = _simple_join(shmem_transport_ofi_CXI_addr_table, PE_size, &setary, &join_list);
 
-    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
-    struct fid_ep *ep = ctx->ep;
-    fi_addr_t coll_addr;
+    if (ret != 0){
+        PRINT_ERROR("BARRIER JOIN FAILED\n");
+        goto quit;
+    }
 
+    mc = _simple_get_mc(&join_list);
+    if (mc == 0){
+        PRINT_ERROR("Barrier MC is invalid\n");
+        goto quit;
+    }
 
-//    mc = get_single_mc(ctx, &joinlist);
-    coll_addr = fi_mc_addr(coll_mc);
 
     ret = fi_barrier(ep, coll_addr, &context);
     if (ret == FI_SUCCESS){
