@@ -1302,7 +1302,11 @@ shmem_internal_collect_linear(void *target, const void *source, size_t len,
                                                  PE_size);
     } while (peer != start_pe);
 
-    shmem_internal_barrier(PE_start, PE_stride, PE_size, &pSync[2]);
+    /* Ben - changed this to an internal sync that we're aware of to hopefully
+     * avoid unintentionally calling an internal HW Accel coll setup ahead of time
+     */
+    shmem_internal_quiet(SHMEM_CTX_DEFAULT);
+    shmem_internal_sync_sw(PE_start, PE_stride, PE_size, &pSync[2]);
 
     pSync[0] = SHMEM_SYNC_VALUE;
     pSync[1] = SHMEM_SYNC_VALUE;
@@ -1323,6 +1327,7 @@ shmem_internal_fcollect_linear(void *target, const void *source, size_t len,
 {
     long tmp = 1;
     long completion = 0;
+    PRINT_DEBUG("Here for sub-4-proc case\n");
 
     /* need 1 slot, plus bcast */
     shmem_internal_assert(SHMEM_COLLECT_SYNC_SIZE >= 1 + SHMEM_BCAST_SYNC_SIZE);
@@ -1509,7 +1514,8 @@ shmem_internal_alltoall(void *dest, const void *source, size_t len,
                                                  PE_size);
     } while (peer != start_pe);
 
-    shmem_internal_barrier(PE_start, PE_stride, PE_size, pSync);
+    shmem_internal_quiet(SHMEM_CTX_DEFAULT);
+    shmem_internal_sync_sw(PE_start, PE_stride, PE_size, pSync);
 
     for (i = 0; i < SHMEM_BARRIER_SYNC_SIZE; i++)
         pSync[i] = SHMEM_SYNC_VALUE;
@@ -1560,7 +1566,9 @@ shmem_internal_alltoalls(void *dest, const void *source, ptrdiff_t dst,
                                                  PE_size);
     } while (peer != start_pe);
 
-    shmem_internal_barrier(PE_start, PE_stride, PE_size, pSync);
+
+    shmem_internal_quiet(SHMEM_CTX_DEFAULT);
+    shmem_internal_sync_sw(PE_start, PE_stride, PE_size, pSync);
 
     for (i = 0; i < SHMEM_BARRIER_SYNC_SIZE; i++)
         pSync[i] = SHMEM_SYNC_VALUE;

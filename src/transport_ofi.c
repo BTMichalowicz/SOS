@@ -75,6 +75,7 @@ struct fid_ep*                  shmem_transport_ofi_target_ep;
 struct fid_cq*                  shmem_transport_ofi_target_cq;
 struct fid_cq*                  shmem_transport_ofi_recv_cq;
 
+struct fabric_info              shmem_transport_ofi_CXI_info;
 struct fid_fabric*              shmem_transport_ofi_CXI_fabfd;
 struct fid_domain*              shmem_transport_ofi_CXI_domainfd;
 struct fid_av*                  shmem_transport_ofi_CXI_avfd;
@@ -83,6 +84,11 @@ fi_addr_t                       shmem_transport_ofi_CXI_world_addr;
 fi_addr_t                       shmem_transport_ofi_CXI_coll_addr;
 fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
 fi_addr_t                       *shmem_transport_ofi_CXI_addr_table;
+struct fid_ep                   *shmem_transport_ofi_CXI_target_ep;
+struct fid_cq                   *shmem_transport_ofi_CXI_target_cq;
+struct fid_cq                   *shmem_transport_ofi_CXI_recv_cq;
+struct fid_cxi_dom_ops          *cxi_com_ops;
+
 #if ENABLE_TARGET_CNTR
 struct fid_cntr*                shmem_transport_ofi_target_cntrfd;
 #endif
@@ -146,6 +152,304 @@ int shmem_transport_ofi_single_ep;
 #define SHM_INTERNAL_UINT64 FI_UINT64
 
 
+static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
+        int mcast_addr, int root_idx,
+        struct avset_ary *setary)
+{
+    struct cxip_comm_key comm_key = {
+        .keytype = COMM_KEY_UNICAST,
+        .ucast.mcast_addr = mcast_addr,
+        .ucast.hwroot_idx = root_idx
+    };
+    struct fi_av_set_attr attr = {
+        .count = 0,
+        .start_addr = FI_ADDR_NOTAVAIL,
+        .end_addr = FI_ADDR_NOTAVAIL,
+        .stride = 1,
+        .comm_key_size = sizeof(comm_key),
+        .comm_key = (void *)&comm_key,
+        .flags = 0,
+    };
+    struct fid_av_set *setp;
+    int i, ret;
+
+    if (setary->avset_siz <= setary->avset_cnt) {
+        void *ptr;
+        int siz;
+
+        PRINT_DEBUG("%s expand setary\n", __func__);
+        siz = setary->avset_siz + 4;
+        ptr = realloc(setary->avset, siz * sizeof(void *));
+        if (!ptr) {
+            PRINT_ERROR("%s realloc failed\n", __func__);
+            ret = -FI_ENOMEM;
+            goto quit;
+        }
+        setary->avset_siz = siz;
+        setary->avset = ptr;
+    }
+
+    PRINT_DEBUG("Starting fi_av_set with avfd %p\n", shmem_transport_ofi_avfd);
+
+    ret = fi_av_set(shmem_transport_ofi_avfd, &attr, &setp, NULL);
+    if (ret) {
+        PRINT_ERROR("%s fi_av_set failed %d\n", __func__, ret);
+        goto quit;
+    }
+    if (setp == NULL){
+        PRINT_ERROR("setp %p is NULL\n", setp);
+        ret = -FI_EINVAL;
+        goto quit;
+    }
+    PRINT_DEBUG("av_set returned: %p\n", setp);
+
+    for (i = 0; i < size; i++) {
+        PRINT_DEBUG("Inserting at index %d of %d into setp %p at addr 0x%lx\n", i, size, setp, fiaddrs[i]);
+        ret = fi_av_set_insert(setp, fiaddrs[i]);
+        if (ret) {
+            PRINT_ERROR("%s fi_av_set_insert failed %d\n", __func__, ret);
+            goto quit;
+        }
+    }
+    // add to expanded list
+    setary->avset[setary->avset_cnt++] = setp;
+    return 0;
+
+quit:
+    PRINT_ERROR("%s: FAILED %d\n", __func__, ret);
+    if (setp) {
+        fi_close(&setp->fid);
+        //free(setp);
+    }
+    return ret;
+}
+
+static int eq_poll(shmem_transport_ctx_t *ctx){
+    int ret = 0;
+    struct fid_eq *eq;
+    struct fi_eq_err_entry eqd = {};
+    join_item_t *jctx = NULL;
+    uint32_t event = 0;
+
+    eq = ctx->eq;
+    struct fid_ep *ep = ctx->ep;
+
+    jctx = NULL;
+    ret = fi_eq_read(eq, &event, &eqd, sizeof(eqd), 0);
+    if (ret == -FI_EAGAIN){
+        return -FI_EAGAIN;
+    }
+
+    if (ret >= 0){
+        if (ret < sizeof(struct fi_eq_entry)) { 
+            PRINT_ERROR("Too small: %d versus %lu\n",
+                    ret, sizeof(struct fi_eq_entry));
+            return -FI_EINVAL;
+        }
+        if ( (!eqd.context) || (event != FI_JOIN_COMPLETE)){
+            PRINT_ERROR("Unexpected eqd response\n");
+            return -FI_EINVAL;
+        }
+        jctx = eqd.context;
+        jctx->retval = 0;
+        jctx->prov_errno = 0;
+        return FI_SUCCESS;
+    }
+    if (ret == -FI_EAVAIL){
+        ret = fi_eq_readerr(eq, &eqd, 0);
+        if (ret < sizeof(struct fi_eq_entry)) { 
+            PRINT_ERROR("Too small: %d versus %lu\n",
+                    ret, sizeof(struct fi_eq_entry));
+            return -FI_EINVAL;
+        }
+
+        if (!eqd.context){
+            PRINT_ERROR("Unexpected eqd response\n");
+            return -FI_EINVAL;
+        } 
+
+        jctx = eqd.context;
+        jctx->retval = eqd.err;
+        jctx->prov_errno = eqd.prov_errno;
+        return FI_SUCCESS;
+    }
+    return FI_SUCCESS;
+}
+
+
+static void *cq_poll(shmem_transport_ctx_t *ctx, void *pcontext){
+    struct fi_cq_err_entry cq_err = {};
+    ssize_t size = 0;
+
+    /* Poll once instead of polling per operation */
+    size = fi_cq_read(ctx->cq, &cq_err, 1);
+    if (size == -FI_EAVAIL)
+        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
+    if (size > 0)
+        return cq_err.op_context;
+//    if (size > 0){
+        /* Event seen! */
+//    } else if (size != -FI_EAGAIN){
+        /* ERROR seen -- wait do we really need these bits? */
+//    }
+
+    size = fi_cq_read(ctx->cq, &cq_err, 1);
+    if (size == -FI_EAVAIL)
+        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
+    if (size > 0)
+        return cq_err.op_context; 
+    return NULL;
+}
+
+
+static void cq_wait(shmem_transport_ctx_t *ctx, void *pcontext){
+    do {
+        if (pcontext == cq_poll(ctx, pcontext))
+            break;
+    } while(true);
+}
+
+static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary, struct d_entry *joinlist,
+        int limit)
+{
+    struct join_item *jctx;
+    int i, ret, total, count;
+
+    PRINT_DEBUG("ENTRY %s\n", __func__);
+    total = setary->avset_cnt;
+    count = 0;
+    PRINT_DEBUG("total join count: %d\n", total);
+    for (i = 0; i < total; i++) {
+        jctx = calloc(1, sizeof(*jctx));
+        if (!jctx) {
+            PRINT_ERROR("calloc failed on jctx[%d]\n", i);
+            ret = -FI_ENOMEM;
+            goto fail;
+        }
+        d_init(&jctx->entry);
+        jctx->join_index = i;
+        jctx->avset = setary->avset[i];
+        struct fid_ep *ep = ctx->ep; 
+        PRINT_DEBUG("join %d of %d initiating with ep %p avset %p, mc entry 0x%lx, jctx %p\n", i, total,
+                ep, setary->avset[i], jctx->mc, jctx);
+        ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
+                setary->avset[i], 0L, &jctx->mc, jctx);
+
+        if (ret == -FI_ECONNREFUSED) {
+            free(jctx);
+            continue;
+        }
+        if (ret != FI_SUCCESS) {
+            PRINT_ERROR("join %d FAILED join %d\n", i, ret);
+            free(jctx);
+            goto fail;
+        }
+        PRINT_DEBUG("Actual join succeeded, polling time\n");
+        do {
+            PRINT_DEBUG("Polling on ctx %p\n", jctx);
+            cq_poll(ctx, jctx); //poll_cqs();
+            PRINT_DEBUG("eq_poll, hoping for either -FI_EAGAIN %ld or FI_SUCCESS %d...\n", -FI_EAGAIN, FI_SUCCESS);
+            ret = eq_poll(ctx);
+        } while (ret == -FI_EAGAIN);
+        if (ret < 0) {
+            PRINT_ERROR("join %d FAILED eq poll %d\n", i, ret);
+            free(jctx);
+            goto fail;
+        }
+        d_insert_tail(&jctx->entry, joinlist);
+        count++;
+    }
+
+    PRINT_ERROR("DONE %s completed %d joins\n", __func__, count);
+    return FI_SUCCESS;
+
+fail:
+    PRINT_ERROR("MULTIJOIN failed\n");
+    //coll_multi_release(joinlist);
+    return ret;
+}
+
+
+
+static struct join_item *coll_single_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
+        int mcast_addr, int root_idx,
+        int exp_retval, int exp_prov_errno,
+        struct avset_ary *setary,
+        struct d_entry *joinlist,
+        const char *msg)
+{
+    struct join_item *jctx = NULL;
+    int ret;
+
+    avset_ary_init(setary);
+    ret = avset_ary_append(fiaddrs, size, mcast_addr, root_idx, setary);
+    if (ret) {
+        PRINT_ERROR("%s JOIN avset_ary_append()=%d\n", msg, ret);
+        goto quit;
+    }
+
+    d_init(joinlist);
+    ret = coll_multi_join(ctx, setary, joinlist, -1);
+    if (ret < 0) {
+        PRINT_ERROR("%s JOIN coll_multi_join()=%d\n", msg, ret);
+        goto quit;
+    }
+
+    jctx = d_first_entry_or_null(joinlist, struct join_item, entry);
+    if (!jctx) {
+        PRINT_ERROR("%s JOIN produced NULL result\n", msg);
+        goto quit;
+    }
+
+    if (jctx->retval != exp_retval || jctx->prov_errno != exp_prov_errno) {
+        PRINT_ERROR("%s JOIN ret=%d,exp=%d prov_errno=%d,exp=%d\n", msg,
+                jctx->retval, exp_retval,
+                jctx->prov_errno, exp_prov_errno);
+        goto quit;
+    }
+
+    return jctx;
+quit:
+    return NULL;
+}
+
+static int _simple_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
+        struct avset_ary *setary,
+        struct d_entry *joinlist)
+{
+    int ret;
+
+    avset_ary_init(setary);
+    ret = avset_ary_append(fiaddrs, size, 0, 1, setary);
+    if (ret)
+        return ret;
+
+    d_init(joinlist);
+    ret = coll_multi_join(ctx, setary, joinlist, -1);
+    if (ret < 0)
+        return ret;
+
+    return 0;
+}
+
+static uint64_t _simple_get_mc(struct d_entry *joinlist)
+{
+    struct join_item *jctx;
+
+    jctx = d_first_entry_or_null(joinlist, struct join_item, entry);
+    if (jctx == NULL) {
+        PRINT_ERROR("Join item is NULL\n");
+        return 0;
+    }
+    return (uint64_t)jctx->mc;
+}
+
+
+
+
+
+
+/* Taken from transport_ofi.h and putting it here */
 
 
 
@@ -1345,10 +1649,11 @@ int populate_av(void)
         if (err != 0) {
             RAISE_ERROR_STR("Runtime get of 'fi_epname' failed");
         }
-        PRINT_DEBUG("Addr_ptr %s at addr %p\n", addr_ptr, addr_ptr);
+    //    PRINT_DEBUG("Addr_ptr %s at addr %p\n", addr_ptr, addr_ptr);
     }
 
-    PRINT_DEBUG("fi_av_insert time!\n");
+ //   PRINT_DEBUG("fi_av_insert time!\n");
+    addr_table = malloc (shmem_internal_num_pes * sizeof (fi_addr_t));
     ret = fi_av_insert(shmem_transport_ofi_avfd,
                        alladdrs,
                        shmem_internal_num_pes,
@@ -1359,7 +1664,7 @@ int populate_av(void)
         RAISE_WARN_STR("av insert failed");
         return ret;
     }
-    PRINT_DEBUG("av insert succeeded\n");
+  //  PRINT_DEBUG("av insert succeeded\n");
  
 
  struct cxip_comm_key comm_key = {
@@ -1379,22 +1684,20 @@ int populate_av(void)
     };
 
     ret = fi_av_set(shmem_transport_ofi_avfd, &avset_attr, &shmem_transport_ofi_avset, NULL);
-    OFI_CHECK_RETURN_STR(ret, "AVSET creation failed");
+   OFI_CHECK_RETURN_STR(ret, "AVSET creation failed");
     PRINT_DEBUG("shmem_transport_ofi_avset done %p\n", shmem_transport_ofi_avset);
 
 
-    fi_addr_t t_a_2 = 0;
+//    fi_addr_t t_a_2 = 0;
     
-    for (i = 0; i< shmem_internal_num_pes; i++){
-        t_a_2 = (uint64_t) (alladdrs+i*shmem_transport_ofi_addrlen); 
-        PRINT_DEBUG("Inserting at index %d for address 0x%lx and avset %p\n", i, t_a_2, shmem_transport_ofi_avset);
-        ret = fi_av_set_insert(shmem_transport_ofi_avset, t_a_2);
-        OFI_CHECK_RETURN_STR(ret, "av_set_insert failed\n");
-    }
+//    for (i = 0; i< shmem_internal_num_pes; i++){
+//        t_a_2 = (uint64_t) (alladdrs+i*shmem_transport_ofi_addrlen); 
+//////        PRINT_DEBUG("Inserting at index %d for address 0x%lx and avset %p\n", i, t_a_2, shmem_transport_ofi_avset);
+//        ret = fi_av_set_insert(shmem_transport_ofi_avset, t_a_2);
+////        OFI_CHECK_RETURN_STR(ret, "av_set_insert failed\n");
+//    }
 
-    ret = fi_av_set_addr(shmem_transport_ofi_avset, &shmem_transport_ofi_world_addr);
-    OFI_CHECK_RETURN_STR(ret, "Collective address fetch failed\n");
-    PRINT_DEBUG("shmem_transport_ofi_world_addr done 0x%lx \n", shmem_transport_ofi_world_addr);
+
  
  free(alladdrs);
 
@@ -1455,6 +1758,9 @@ static void get_local_nic(shmem_transport_ctx_t *ctx, int hsn, nic_addr_t *nic){
         n = fread(text, 1, sizeof(text), fid);
         fclose(fid);
         text[n] = 0; /* NULL termination is important */
+      }else{
+        PRINT_ERROR("Failed to get nic address fname %s\n", fname);
+        memset(NULL, 0, 10);
     }
 
     nic->value = 0L;
@@ -1465,177 +1771,56 @@ static void get_local_nic(shmem_transport_ctx_t *ctx, int hsn, nic_addr_t *nic){
         ptr++;
     }
 
-    nic->nic_count = hsn;
+    nic->hsn = hsn;
     nic->rank = shmem_internal_my_pe;
+    PRINT_DEBUG("NIC hsn=%d rank=%3d nic=%05x\n", nic->hsn, shmem_internal_my_pe, nic->nic);
+
 }
 
-int shmem_collective_nic_initialization(void){
+void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
+    
+    avset_ary_t setary;
+    d_entry_t join_list;
+    uint64_t context;
+    uint64_t mc;
+    int i = 0, ret = 0;
 
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
-    int err = FI_SUCCESS, i = 0, local_size = 0;
-   // fi_addr_t *fi_addrs = NULL;
-    internal_addr_t *alladdrs = NULL;
-    local_size = ctx->num_nics * NICSIZE;
-    if (ctx->NIC_array){
-        return FI_SUCCESS;
-    }
 
     struct fid_ep *ep = ctx->ep;
+    PRINT_DEBUG("_simple_join (%p, %d, setary, join_list)\n", /*shmem_transport_ofi_CXI_*/addr_table, PE_size);
+    ret = _simple_join(ctx, /*shmem_transport_ofi_CXI_*/addr_table, PE_size, &setary, &join_list);
 
-    PRINT_DEBUG("Initialization \n");
-    ctx->NIC_array = calloc(shmem_internal_num_pes, local_size);
-    if (ctx->NIC_array == NULL){
-        err = -FI_ENOMEM;
-        goto fail;
-    }
-    nic_addr_t *local_nics = calloc(1, local_size);
-    if (local_nics == NULL){
-        err = -FI_ENOMEM;
-        goto fail;
-    }
-    alladdrs = calloc(shmem_internal_num_pes, sizeof(internal_addr_t));
-    if (alladdrs == NULL){
-        err = -FI_ENOMEM;
-        goto fail;
+    if (ret != 0){
+        PRINT_ERROR("BARRIER JOIN FAILED\n");
+        goto quit;
     }
 
-    shmem_transport_ofi_CXI_addr_table = calloc(shmem_internal_num_pes, sizeof(fi_addr_t));
-    if (!shmem_transport_ofi_CXI_addr_table){
-        PRINT_ERROR("NO MEMORY\n");
-        return -FI_ENOMEM;
+    PRINT_DEBUG("Fetching MC\n");
+    mc = _simple_get_mc(&join_list);
+    if (mc == 0){
+        PRINT_ERROR("Barrier MC is invalid\n");
+        goto quit;
     }
 
-    PRINT_DEBUG("Fetching local_NIC\n");
 
-    for (i = 0 ; i < ctx->nics_per_rank; i++){
-        get_local_nic(ctx, i, &local_nics[i]);
+    ret = fi_barrier(ep, mc, &context);
+    if (ret == FI_SUCCESS){
+        cq_wait(ctx, &context); /* TODO Implement */
+    }else{
+        fprintf(stderr, "Unable to barrier\n");
+        goto quit;
     }
 
-    PRINT_DEBUG("Local NICs retrieved\n");
-    /* TODO: ALSO need to allocate everything on the shared heap
-     * Theoretically doable HERE since internal heap has been set up
-     * already
-     */
 
-    nic_addr_t *shmem_nics = shmem_malloc(shmem_internal_num_pes * local_size);
-    nic_addr_t *shmem_nics_2 = shmem_malloc(1 * local_size);
-    memcpy(local_nics, shmem_nics_2, local_size*ctx->nics_per_rank);
-    shmem_fcollectmem(SHMEM_TEAM_WORLD, shmem_nics, shmem_nics_2, local_size); 
-    PRINT_DEBUG("SHMEM Collect worked\n");
-    memcpy(ctx->NIC_array, shmem_nics, local_size*shmem_internal_num_pes);
-    shmem_free(shmem_nics_2);
-    shmem_free(shmem_nics);
-    shmem_nics_2 = NULL;
-    shmem_nics = NULL;
-    /* TODO: Use an internal algorithm to set up the addresses per NIC address *!!!! */
-
-    ctx->num_nics = shmem_internal_num_pes * ctx->nics_per_rank;
-    qsort(ctx->NIC_array, ctx->num_nics, NICSIZE, _compare);
+quit:
+    fprintf(stderr, "[%s][%s:%d] ERROR: %d\n",
+            __func__, __FILE__, __LINE__, ret);
+    shmem_global_exit(ret);
 
 
-    for (i = 0; i < shmem_internal_num_pes; i++){
-        alladdrs[i].nic = ctx->NIC_array[i].nic_addr;
-    }
-    PRINT_DEBUG("OFI CXI init\n");
-
-    err = fi_fabric(shmem_transport_ofi_info.p_info->fabric_attr, &shmem_transport_ofi_CXI_fabfd, NULL);
-    OFI_CHECK_RETURN_STR(err, "CXI fab failed\n");
-
-    PRINT_DEBUG("fabric set up\n");
-    
-    err = fi_domain(shmem_transport_ofi_CXI_fabfd, shmem_transport_ofi_info.p_info,
-            &shmem_transport_ofi_CXI_domainfd, NULL);
-    OFI_CHECK_RETURN_STR(err, "CXI domain init failed\n");
-    
-    PRINT_DEBUG("Domain set up\n");
-
-    struct fi_av_attr av_attr = {};
-    av_attr.type = FI_AV_TABLE;
-    av_attr.rx_ctx_bits = 0;
-
-
-    err = fi_av_open(shmem_transport_ofi_CXI_domainfd, &av_attr,
-            &shmem_transport_ofi_CXI_avfd, NULL);
-    OFI_CHECK_RETURN_STR(err, "CXI domain init failed\n");
-
-    err = fi_av_insert(shmem_transport_ofi_CXI_avfd, alladdrs, shmem_internal_num_pes,
-            shmem_transport_ofi_CXI_addr_table, 0, NULL);
-    if (err != shmem_internal_num_pes){
-        PRINT_ERROR("Failed to insert all addresses: %d\n", err);
-        goto fail;
-    }
-
-    PRINT_DEBUG("AV insertion is done! Time to set everything else up; addr_table: %p\n", 
-            shmem_transport_ofi_CXI_addr_table);
-
-    fi_addr_t myaddr;
-    size_t caddrlen;
-    myaddr = shmem_transport_ofi_CXI_addr_table[shmem_internal_my_pe];
-    err = fi_av_lookup(shmem_transport_ofi_CXI_avfd, myaddr, &shmem_transport_ofi_CXI_my_addr, &caddrlen);
-    OFI_CHECK_RETURN_STR(err, "fi_av_lookup test failed\n");
-
-    PRINT_DEBUG("my_addr 0x%lx\n", shmem_transport_ofi_CXI_my_addr);
-
-
-    PRINT_DEBUG("Finished here. Performing a joining of collectives and avset configuration\n");
-
-    return err;
-
-
-take_2:    
-
-   struct cxip_comm_key comm_key = {
-        .keytype = COMM_KEY_UNICAST,
-        .ucast.mcast_addr = 0,
-        .ucast.hwroot_idx = 0
-    };
-
-    struct fi_av_set_attr avset_attr = {
-        .count = 0,
-        .start_addr = FI_ADDR_NOTAVAIL,
-        .end_addr = FI_ADDR_NOTAVAIL,
-        .stride = 1,
-        .comm_key_size = sizeof(comm_key),
-        .comm_key = (void *)&comm_key,
-        .flags = 0,
-    };
-
-    err = fi_av_set(shmem_transport_ofi_CXI_avfd, &avset_attr, 
-            &shmem_transport_ofi_CXI_avfd_set, NULL);
-    OFI_CHECK_RETURN_STR(err, "CXI avset creation failed\n");
-
-    PRINT_DEBUG("CXI avset creation %p\n", shmem_transport_ofi_CXI_avfd_set);
-
-    for (i = 0; i < shmem_internal_num_pes; i++){
-        PRINT_DEBUG("Index %d, addr_table 0x%lx, avset %p\n", i, shmem_transport_ofi_CXI_addr_table[i], shmem_transport_ofi_CXI_avfd_set);
-        err = fi_av_set_insert(shmem_transport_ofi_CXI_avfd_set, 
-                            shmem_transport_ofi_CXI_addr_table[i]);
-        OFI_CHECK_RETURN_STR(err, "CXI avset_insert failed\n");
-    }
-    err = fi_av_set_addr(shmem_transport_ofi_CXI_avfd_set, 
-            &shmem_transport_ofi_CXI_world_addr);
-    OFI_CHECK_RETURN_STR(err, "CXI Coll address fetch failed\n");
-    PRINT_DEBUG("shmem_transport_ofi_world_addr for CXI 0x%lx\n", shmem_transport_ofi_CXI_world_addr);
-
-   PRINT_DEBUG("Time to join CXI collective\n");
-   uint64_t context = 0;
-   err = fi_join_collective(ep, shmem_transport_ofi_CXI_world_addr, 
-           shmem_transport_ofi_CXI_avfd_set, 0, &coll_mc, &context);
-   OFI_CHECK_RETURN_STR(err, "Can not join the collective\n");
-
-   wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
-
-
-   /* TODO:: FIXME:: WORKING OUT THIS PART */
-    return err;
-
-
-fail:
-    ctx->num_nics = 0;
-    if (ctx->NIC_array) free(ctx->NIC_array);
-    if (local_nics) free(local_nics);
-    return err;
 }
+
 
 static inline
 int allocate_fabric_resources(struct fabric_info *info)
@@ -1834,7 +2019,7 @@ int query_for_fabric(struct fabric_info *info)
     domain_attr.mr_mode       = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED | FI_MR_PROV_KEY;
 #endif
 #ifdef ENABLE_MR_ENDPOINT
-    domain_attr.mr_mode |= FI_MR_ENDPOINT;
+    domain_attr.mr_mode |= FI_MR_ENDPOINT | FI_COLLECTIVE;
 #endif
 #ifdef USE_FI_HMEM
     domain_attr.mr_mode |= FI_MR_HMEM;
@@ -2002,6 +2187,209 @@ int query_for_fabric(struct fabric_info *info)
 
     return ret;
 }
+
+
+int shmem_collective_nic_initialization(void){
+
+    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
+    int err = FI_SUCCESS, i = 0, local_size = 0;
+   // fi_addr_t *fi_addrs = NULL;
+    internal_addr_t *alladdrs = NULL;
+    local_size = ctx->nics_per_rank * NICSIZE;
+    if (ctx->NIC_array){
+        return FI_SUCCESS;
+    }
+
+ //   err = query_for_fabric(&shmem_transport_ofi_CXI_info);
+ //   OFI_CHECK_RETURN_STR(err, "CXI info query failed\n");
+ //   err = allocate_fabric_resources(&shmem_transport_ofi_CXI_info);
+ //   OFI_CHECK_RETURN_STR(err, "CXI info fabric allocation failed\n");
+
+    PRINT_DEBUG("Initialization \n");
+    ctx->NIC_array = calloc(shmem_internal_num_pes, local_size);
+    if (ctx->NIC_array == NULL){
+        err = -FI_ENOMEM;
+        goto fail;
+    }
+    nic_addr_t *local_nics = calloc(1, local_size);
+    if (local_nics == NULL){
+        err = -FI_ENOMEM;
+        goto fail;
+    }
+
+    err = -FI_ENOMEM;
+    alladdrs = calloc(shmem_internal_num_pes, sizeof(internal_addr_t));
+    if (alladdrs == NULL){
+        err = -FI_ENOMEM;
+        goto fail;
+    }
+
+    shmem_transport_ofi_CXI_addr_table = calloc(shmem_internal_num_pes, sizeof(fi_addr_t));
+    if (!shmem_transport_ofi_CXI_addr_table){
+        PRINT_ERROR("NO MEMORY\n");
+        return -FI_ENOMEM;
+    }
+
+    PRINT_DEBUG("Fetching local_NIC\n");
+
+    err = -FI_EFAULT;
+    PRINT_DEBUG("ctx->nics_per_rank: %d\n", ctx->nics_per_rank);
+    for (i = 0 ; i < ctx->nics_per_rank; i++){
+        get_local_nic(ctx, i, &local_nics[i]);
+    }
+
+//    for (i = 0; i < ctx->num_nics; i++){
+        PRINT_DEBUG("LOCAL rank=%2d hsn=%d nic=%05x\n",
+                local_nics[0].rank,
+                local_nics[0].hsn,
+                local_nics[0].nic);
+//    }
+
+
+    PRINT_DEBUG("Local NICs retrieved\n");
+
+    nic_addr_t *shmem_nics = shmem_malloc(shmem_internal_num_pes* local_size);
+    nic_addr_t *shmem_nics_2 = shmem_malloc(local_size);
+    memcpy(shmem_nics_2, local_nics, local_size);
+    PRINT_DEBUG("Beginning shmem collect\n");
+    shmem_fcollectmem(SHMEM_TEAM_WORLD, shmem_nics, shmem_nics_2, local_size); 
+    PRINT_DEBUG("SHMEM Collect worked\n");
+    memcpy(ctx->NIC_array, shmem_nics, local_size*shmem_internal_num_pes);
+    PRINT_DEBUG("Memcpy worked\n");
+    //shmem_free(shmem_nics_2);
+    //shmem_free(shmem_nics);
+    shmem_nics_2 = NULL;
+    shmem_nics = NULL;
+
+
+    for (i = 0; i < ctx->num_nics; i++){
+        PRINT_DEBUG("i %d rank=%2d hsn=%d nic=%05x\n",
+                i, ctx->NIC_array[i].rank,
+                ctx->NIC_array[i].hsn,
+                ctx->NIC_array[i].nic);
+    }
+
+
+    PRINT_DEBUG("Sorting NICs\n");
+    ctx->num_nics = shmem_internal_num_pes * ctx->nics_per_rank;
+    qsort(ctx->NIC_array, ctx->num_nics, NICSIZE, _compare);
+
+    for (i = 0; i < ctx->num_nics; i++){
+        PRINT_DEBUG("i %d rank=%2d hsn=%d nic=%05x\n",
+                i, ctx->NIC_array[i].rank,
+                ctx->NIC_array[i].hsn,
+                ctx->NIC_array[i].nic);
+    }
+
+    PRINT_DEBUG("Starting to add NIC addresses\n");
+    for (i = 0; i < shmem_internal_num_pes; i++){
+        alladdrs[i].nic = ctx->NIC_array[i].nic;
+    }
+
+    for (i = 0; i < ctx->num_nics; i++){
+        PRINT_DEBUG("i %d rank=%2d hsn=%d nic=%05x\n",
+                i, ctx->NIC_array[i].rank,
+                ctx->NIC_array[i].hsn,
+                ctx->NIC_array[i].nic);
+    }
+
+    PRINT_DEBUG("OFI CXI init\n");
+
+    err = fi_fabric(shmem_transport_ofi_info.p_info->fabric_attr, &shmem_transport_ofi_CXI_fabfd, NULL);
+    OFI_CHECK_RETURN_STR(err, "CXI fab failed\n");
+    if (shmem_transport_ofi_CXI_fabfd == NULL){
+        PRINT_ERROR("fabric fd is null\n");
+        goto fail;
+    }
+
+    PRINT_DEBUG("fabric set up\n");
+    
+    err = fi_domain(shmem_transport_ofi_CXI_fabfd, shmem_transport_ofi_info.p_info,
+            &shmem_transport_ofi_CXI_domainfd, NULL);
+    OFI_CHECK_RETURN_STR(err, "CXI domain init failed\n");
+
+    if (shmem_transport_ofi_CXI_domainfd == NULL){
+        PRINT_ERROR("domainfd is NULL\n");
+        goto fail;
+    }
+    PRINT_DEBUG("Domain set up\n");
+
+
+
+    struct fi_av_attr av_attr = {};
+    av_attr.type = FI_AV_TABLE;
+
+    err = fi_av_open(shmem_transport_ofi_CXI_domainfd, &av_attr,
+            &shmem_transport_ofi_CXI_avfd, NULL);
+    OFI_CHECK_RETURN_STR(err, "CXI domain init failed\n");
+
+    if (shmem_transport_ofi_CXI_avfd == NULL){
+        PRINT_ERROR("avfd is null!!\n");
+        goto fail;
+    }
+
+
+
+    err = fi_endpoint(shmem_transport_ofi_CXI_domainfd, shmem_transport_ofi_CXI_info.p_info,
+            &shmem_transport_ofi_CXI_target_ep, NULL);
+    
+
+    OFI_CHECK_RETURN_STR(err, "CXI ep failed\n");
+    
+    err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &shmem_transport_ofi_CXI_avfd->fid, 0);
+    OFI_CHECK_RETURN_STR(err, "CXI_fi_ep_bind AV to target endpoint failed");
+
+    struct fi_cq_attr cq_attr = {0};
+
+    err = fi_cq_open(shmem_transport_ofi_CXI_domainfd, &cq_attr,
+                     &shmem_transport_ofi_CXI_target_cq, NULL);
+    OFI_CHECK_RETURN_MSG(err, "cq_open failed (%s)\n", fi_strerror(errno));
+
+    err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep,
+                     &shmem_transport_ofi_CXI_target_cq->fid, FI_SELECTIVE_COMPLETION | FI_TRANSMIT | FI_RECV);
+    OFI_CHECK_RETURN_STR(err, "fi_ep_bind CQ to target endpoint failed");
+
+    err = fi_enable(shmem_transport_ofi_CXI_target_ep);
+    OFI_CHECK_RETURN_STR(err, "fi_enable on target endpoint failed");
+
+    ctx->ep = shmem_transport_ofi_CXI_target_ep;
+    
+
+    PRINT_DEBUG("shmem_transport_ofi_CXI_avfd: %p\n", shmem_transport_ofi_CXI_avfd);
+
+    err = fi_av_insert(shmem_transport_ofi_CXI_avfd, alladdrs, shmem_internal_num_pes,
+            shmem_transport_ofi_CXI_addr_table, 0, NULL);
+    if (err != shmem_internal_num_pes){
+        PRINT_ERROR("Failed to insert all addresses: %d\n", err);
+        goto fail;
+    }
+
+    PRINT_DEBUG("AV insertion is done! Time to set everything else up; addr_table: %p\n", 
+            shmem_transport_ofi_CXI_addr_table);
+
+    fi_addr_t myaddr;
+    size_t caddrlen;
+    myaddr = shmem_transport_ofi_CXI_addr_table[shmem_internal_my_pe];
+    err = fi_av_lookup(shmem_transport_ofi_CXI_avfd, myaddr, &shmem_transport_ofi_CXI_my_addr, &caddrlen);
+    OFI_CHECK_RETURN_STR(err, "fi_av_lookup test failed\n");
+
+    PRINT_DEBUG("my_addr 0x%lx\n", shmem_transport_ofi_CXI_my_addr);
+
+
+    PRINT_DEBUG("Finished here. Performing a joining of collectives and avset configuration\n");
+
+    return err;
+
+
+fail:
+    ctx->num_nics = 0;
+    if (ctx->NIC_array) free(ctx->NIC_array);
+    if (local_nics) free(local_nics);
+    PRINT_ERROR("FAILED nic initialization: %d\n", err);
+    return err;
+}
+
+
 
 static int shmem_transport_ofi_target_ep_init(void)
 {

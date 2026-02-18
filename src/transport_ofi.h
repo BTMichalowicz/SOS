@@ -108,15 +108,18 @@ extern struct fid_av_set*              shmem_transport_ofi_CXI_avfd_set;
 extern fi_addr_t                       shmem_transport_ofi_CXI_world_addr;
 extern fi_addr_t                       shmem_transport_ofi_CXI_coll_addr;
 extern fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
-
+extern fi_addr_t                       *shmem_transport_ofi_CXI_addr_table;
+extern struct fid_ep                   *shmem_transport_ofi_CXI_target_ep;
+extern struct fid_cq                   *shmem_transport_ofi_CXI_target_cq;
+extern struct fid_cq                   *shmem_transport_ofi_CXI_recv_cq;
 
 
 typedef union nic_addr {
     uint64_t value;
     struct {
-        uint64_t nic_addr:20;
-        uint64_t net_route:28;
-        uint64_t nic_count:2;
+        uint64_t nic:20;
+        uint64_t net:28;
+        uint64_t hsn:2;
         uint64_t rank:14;
     } __attribute__((__packed__));
 } nic_addr_t;
@@ -375,283 +378,6 @@ static void avset_ary_destroy(struct avset_ary *setary)
 }
 
 
-static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
-        int mcast_addr, int root_idx,
-        struct avset_ary *setary)
-{
-    struct cxip_comm_key comm_key = {
-        .keytype = COMM_KEY_UNICAST,
-        .ucast.mcast_addr = mcast_addr,
-        .ucast.hwroot_idx = root_idx
-    };
-    struct fi_av_set_attr attr = {
-        .count = 0,
-        .start_addr = FI_ADDR_NOTAVAIL,
-        .end_addr = FI_ADDR_NOTAVAIL,
-        .stride = 1,
-        .comm_key_size = sizeof(comm_key),
-        .comm_key = (void *)&comm_key,
-        .flags = 0,
-    };
-    struct fid_av_set *setp;
-    int i, ret;
-
-    if (setary->avset_siz <= setary->avset_cnt) {
-        void *ptr;
-        int siz;
-
-        PRINT_DEBUG("%s expand setary\n", __func__);
-        siz = setary->avset_siz + 4;
-        ptr = realloc(setary->avset, siz * sizeof(void *));
-        if (!ptr) {
-            PRINT_ERROR("%s realloc failed\n", __func__);
-            ret = -FI_ENOMEM;
-            goto quit;
-        }
-        setary->avset_siz = siz;
-        setary->avset = ptr;
-    }
-
-
-
-    ret = fi_av_set(shmem_transport_ofi_CXI_avfd, &attr, &setp, NULL);
-    if (ret) {
-        PRINT_ERROR("%s fi_av_set failed %d\n", __func__, ret);
-        goto quit;
-    }
-
-    for (i = 0; i < size; i++) {
-        ret = fi_av_set_insert(setp, fiaddrs[i]);
-        if (ret) {
-            PRINT_ERROR("%s fi_av_set_insert failed %d\n", __func__, ret);
-            goto quit;
-        }
-    }
-    // add to expanded list
-    setary->avset[setary->avset_cnt++] = setp;
-    return 0;
-
-quit:
-    PRINT_ERROR("%s: FAILED %d\n", __func__, ret);
-    if (setp) {
-        fi_close(&setp->fid);
-        free(setp);
-    }
-    return ret;
-}
-
-static int eq_poll(shmem_transport_ctx_t *ctx){
-    int ret = 0;
-    struct fid_eq *eq;
-    struct fi_eq_err_entry eqd = {};
-    join_item_t *jctx = NULL;
-    uint32_t event = 0;
-
-    eq = ctx->eq;
-    struct fid_ep *ep = ctx->ep;
-
-    jctx = NULL;
-    ret = fi_eq_read(eq, &event, &eqd, sizeof(eqd), 0);
-    if (ret == -FI_EAGAIN){
-        return -FI_EAGAIN;
-    }
-
-    if (ret >= 0){
-        if (ret < sizeof(struct fi_eq_entry)) { 
-            PRINT_ERROR("Too small: %d versus %lu\n",
-                    ret, sizeof(struct fi_eq_entry));
-            return -FI_EINVAL;
-        }
-        if ( (!eqd.context) || (event != FI_JOIN_COMPLETE)){
-            PRINT_ERROR("Unexpected eqd response\n");
-            return -FI_EINVAL;
-        }
-        jctx = eqd.context;
-        jctx->retval = 0;
-        jctx->prov_errno = 0;
-        return FI_SUCCESS;
-    }
-    if (ret == -FI_EAVAIL){
-        ret = fi_eq_readerr(eq, &eqd, 0);
-        if (ret < sizeof(struct fi_eq_entry)) { 
-            PRINT_ERROR("Too small: %d versus %lu\n",
-                    ret, sizeof(struct fi_eq_entry));
-            return -FI_EINVAL;
-        }
-
-        if (!eqd.context){
-            PRINT_ERROR("Unexpected eqd response\n");
-            return -FI_EINVAL;
-        } 
-
-        jctx = eqd.context;
-        jctx->retval = eqd.err;
-        jctx->prov_errno = eqd.prov_errno;
-        return FI_SUCCESS;
-    }
-    return FI_SUCCESS;
-}
-static void *cq_poll(shmem_transport_ctx_t *ctx, void *pcontext){
-    struct fi_cq_err_entry cq_err = {};
-    ssize_t size = 0;
-
-    /* Poll once instead of polling per operation */
-    size = fi_cq_read(ctx->cq, &cq_err, 1);
-    if (size == -FI_EAVAIL)
-        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
-    if (size > 0)
-        return cq_err.op_context;
-//    if (size > 0){
-        /* Event seen! */
-//    } else if (size != -FI_EAGAIN){
-        /* ERROR seen -- wait do we really need these bits? */
-//    }
-
-    size = fi_cq_read(ctx->cq, &cq_err, 1);
-    if (size == -FI_EAVAIL)
-        size = fi_cq_readerr(ctx->cq, &cq_err, 1);
-    if (size > 0)
-        return cq_err.op_context; 
-    return NULL;
-}
-
-
-
-
-static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary, struct d_entry *joinlist,
-        int limit)
-{
-    struct join_item *jctx;
-    int i, ret, total, count;
-
-    PRINT_ERROR("ENTRY %s\n", __func__);
-
-
-    total = setary->avset_cnt;
-    count = 0;
-    for (i = 0; i < total; i++) {
-        jctx = calloc(1, sizeof(*jctx));
-        if (!jctx) {
-            PRINT_ERROR("calloc failed on jctx[%d]\n", i);
-            ret = -FI_ENOMEM;
-            goto fail;
-        }
-        d_init(&jctx->entry);
-        jctx->join_index = i;
-        jctx->avset = setary->avset[i];
-        PRINT_DEBUG("join %d of %d initiating\n", i, total);
-        struct fid_ep *ep = ctx->ep; 
-        ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
-                setary->avset[i], 0L, &jctx->mc, jctx);
-
-        if (ret == -FI_ECONNREFUSED) {
-            free(jctx);
-            continue;
-        }
-        if (ret != FI_SUCCESS) {
-            PRINT_ERROR("join %d FAILED join %d\n", i, ret);
-            free(jctx);
-            goto fail;
-        }
-        do {
-            cq_poll(ctx, jctx); //poll_cqs();
-            ret = eq_poll(ctx);
-        } while (ret == -FI_EAGAIN);
-        if (ret < 0) {
-            PRINT_ERROR("join %d FAILED eq poll %d\n", i, ret);
-            free(jctx);
-            goto fail;
-        }
-        d_insert_tail(&jctx->entry, joinlist);
-        count++;
-    }
-
-    PRINT_ERROR("DONE %s completed %d joins\n", __func__, count);
-    return FI_SUCCESS;
-
-fail:
-    PRINT_ERROR("MULTIJOIN failed\n");
-    //coll_multi_release(joinlist);
-    return ret;
-}
-
-
-
-static struct join_item *coll_single_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
-        int mcast_addr, int root_idx,
-        int exp_retval, int exp_prov_errno,
-        struct avset_ary *setary,
-        struct d_entry *joinlist,
-        const char *msg)
-{
-    struct join_item *jctx = NULL;
-    int ret;
-
-    avset_ary_init(setary);
-    ret = avset_ary_append(fiaddrs, size, mcast_addr, root_idx, setary);
-    if (ret) {
-        PRINT_ERROR("%s JOIN avset_ary_append()=%d\n", msg, ret);
-        goto quit;
-    }
-
-    d_init(joinlist);
-    ret = coll_multi_join(ctx, setary, joinlist, -1);
-    if (ret < 0) {
-        PRINT_ERROR("%s JOIN coll_multi_join()=%d\n", msg, ret);
-        goto quit;
-    }
-
-    jctx = d_first_entry_or_null(joinlist, struct join_item, entry);
-    if (!jctx) {
-        PRINT_ERROR("%s JOIN produced NULL result\n", msg);
-        goto quit;
-    }
-
-    if (jctx->retval != exp_retval || jctx->prov_errno != exp_prov_errno) {
-        PRINT_ERROR("%s JOIN ret=%d,exp=%d prov_errno=%d,exp=%d\n", msg,
-                jctx->retval, exp_retval,
-                jctx->prov_errno, exp_prov_errno);
-        goto quit;
-    }
-
-    return jctx;
-quit:
-    return NULL;
-}
-
-static int _simple_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
-        struct avset_ary *setary,
-        struct d_entry *joinlist)
-{
-    int ret;
-
-    avset_ary_init(setary);
-    ret = avset_ary_append(fiaddrs, size, 0, 1, setary);
-    if (ret)
-        return ret;
-
-    d_init(joinlist);
-    ret = coll_multi_join(ctx, setary, joinlist, -1);
-    if (ret < 0)
-        return ret;
-
-    return 0;
-}
-
-static uint64_t _simple_get_mc(struct d_entry *joinlist)
-{
-    struct join_item *jctx;
-
-    jctx = d_first_entry_or_null(joinlist, struct join_item, entry);
-    if (jctx == NULL) {
-        PRINT_ERROR("Join item is NULL\n");
-        return 0;
-    }
-    return (uint64_t)jctx->mc;
-}
-
-
-
 
 /*End that direct steal */
 
@@ -666,29 +392,15 @@ static uint64_t _simple_get_mc(struct d_entry *joinlist)
 #define NODELIST "SLURM_NODELIST"
 #define NICS_PER_RANK "PMI_NUM_HSNS"
 
-
-
-
 /* TODO: Currently applies ONLY to libfabrics implementations
  * TODO: ALSO needs Slingshot and OFI setups here 
  */
 
-
 int shmem_collective_nic_initialization(void);
 
 
-
-
-static void cq_wait(shmem_transport_ctx_t *ctx, void *pcontext){
-    do {
-        if (pcontext == cq_poll(ctx, pcontext))
-            break;
-    } while(true);
-}
-
 extern fi_addr_t shmem_transport_ofi_world_addr;
 extern fi_addr_t shmem_transport_ofi_coll_addr;
-
 
 
 /* End libfabric shenanigans */
@@ -962,45 +674,7 @@ int wait_for_join(shmem_transport_ctx_t *ctx, uint32_t signal, void *context);
 
 
 
-static inline void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
-    
-    avset_ary_t setary;
-    d_entry_t join_list;
-    uint64_t context;
-    uint64_t mc;
-    int i = 0, ret = 0;
-
-    ret = _simple_join(shmem_transport_ofi_CXI_addr_table, PE_size, &setary, &join_list);
-
-    if (ret != 0){
-        PRINT_ERROR("BARRIER JOIN FAILED\n");
-        goto quit;
-    }
-
-    mc = _simple_get_mc(&join_list);
-    if (mc == 0){
-        PRINT_ERROR("Barrier MC is invalid\n");
-        goto quit;
-    }
-
-
-    ret = fi_barrier(ep, coll_addr, &context);
-    if (ret == FI_SUCCESS){
-        cq_wait(ctx, &context); /* TODO Implement */
-    }else{
-        fprintf(stderr, "Unable to barrier\n");
-        goto quit;
-    }
-
-
-quit:
-    fprintf(stderr, "[%s][%s:%d] ERROR: %d\n",
-            __func__, __FILE__, __LINE__, ret);
-    shmem_global_exit(ret);
-
-
-}
-
+void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync);
 
 #ifdef USE_CTX_LOCK
 #define SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx)                                       \

@@ -47,6 +47,47 @@ void shmem_internal_sync_tree(int PE_start, int PE_stride, int PE_size, long *pS
 void shmem_internal_sync_dissem(int PE_start, int PE_stride, int PE_size, long *pSync);
 void shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync);
 
+
+
+static inline void shmem_internal_sync_sw(int PE_start, int PE_stride, int PE_size, long *pSync){
+    if (shmem_internal_params.BARRIERS_FLUSH) {
+        fflush(stdout);
+        fflush(stderr);
+    }
+
+    if (PE_size == 1) return;
+
+    switch (shmem_internal_barrier_type) {
+    case AUTO:
+    case HW_ACCEL:
+        if (PE_size < shmem_internal_params.COLL_CROSSOVER) {
+            shmem_internal_sync_linear(PE_start, PE_stride, PE_size, pSync);
+        } else {
+            shmem_internal_sync_tree(PE_start, PE_stride, PE_size, pSync);
+        }
+        break;
+    case LINEAR:
+        shmem_internal_sync_linear(PE_start, PE_stride, PE_size, pSync);
+        break;
+    case TREE:
+        shmem_internal_sync_tree(PE_start, PE_stride, PE_size, pSync);
+        break;
+    case DISSEM:
+        shmem_internal_sync_dissem(PE_start, PE_stride, PE_size, pSync);
+        break;
+    default:
+        RAISE_ERROR_MSG("Illegal barrier/sync type (%d)\n",
+                        shmem_internal_barrier_type);
+    }
+
+    /* Ensure remote updates are visible in memory */
+    shmem_internal_membar_acq_rel();
+    shmem_transport_syncmem();
+}
+
+
+
+
 static inline
 void
 shmem_internal_sync(int PE_start, int PE_stride, int PE_size, long *pSync)
@@ -93,7 +134,7 @@ static inline
 void
 shmem_internal_sync_all(void)
 {
-    shmem_internal_sync(0, 1, shmem_internal_num_pes, shmem_internal_sync_all_psync);
+    shmem_internal_sync_sw(0, 1, shmem_internal_num_pes, shmem_internal_sync_all_psync);
 }
 
 
@@ -102,6 +143,7 @@ void
 shmem_internal_barrier(int PE_start, int PE_stride, int PE_size, long *pSync)
 {
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
+    PRINT_DEBUG("Internal sync here\n");
     shmem_internal_sync(PE_start, PE_stride, PE_size, pSync);
 }
 

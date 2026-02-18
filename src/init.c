@@ -520,11 +520,11 @@ shmem_internal_heap_postinit(void)
     atexit(shmem_internal_shutdown_atexit);
     shmem_internal_initialized = 1;
 
-    ret = shmem_collective_nic_initialization();
-    if (ret != 0){
-        RETURN_ERROR_MSG("Coll_init for CXI nics failed (%d)\n", ret);
-        goto cleanup_postinit;
-    }
+//    ret = shmem_collective_nic_initialization();
+//    if (ret != 0){
+//        RETURN_ERROR_MSG("Coll_init for CXI nics failed (%d)\n", ret);
+//        goto cleanup_postinit;
+//    }
 
         
 
