@@ -36,6 +36,8 @@
 #include <rdma/fi_cxi_ext.h>
 #include <rdma/fi_collective.h>
 #include <sys/time.h>
+#include "shmem_ofi_ctx.h"
+#include "cxi_extension_funcs.h"
 
 static inline double getwtime(void) {
     double wtime = 0.0;
@@ -46,51 +48,10 @@ static inline double getwtime(void) {
     return wtime;
 }
 
-/* begin ben shenanigans - Start Jan 13 2026 */
-
-#ifndef container_of
-#define container_of(ptr, type, field) \
-        ((type *) ((char *) ptr - offsetof(type, field)))
-#endif
-
-#ifndef PRINT_DEBUG
-#define PRINT_DEBUG(fmt, args...)                               \
-    do {                                                        \
-        fflush(stdout);                                         \
-        fflush(stderr);                                         \
-        fprintf(stderr, "[rank_%d][%s][%s:%d] "fmt,             \
-                        shmem_internal_my_pe,                   \
-                        __FILE__, __func__, __LINE__,           \
-                        ##args);                                \
-    } while(0);
-#endif /* PRINT_DEBUG */
-
-#ifndef PRINT_ERROR
-#define PRINT_ERROR(fmt, args...)                               \
-    do {                                                        \
-        fflush(stdout);                                         \
-        fflush(stderr);                                         \
-        fprintf(stderr, "[rank_%d][%s][%s:%d][ERROR] "fmt,             \
-                        shmem_internal_my_pe,                   \
-                        __FILE__, __func__, __LINE__,           \
-                        ##args);                                \
-    } while(0);
-#endif /* PRINT_ERROR */
 
 typedef struct shmem_transport_ofi_bounce_buffer_t shmem_transport_ofi_bounce_buffer_t;
 
 typedef int shmem_transport_ct_t;
-
-enum shmem_internal_tid_t { tid_is_pid_t, tid_is_uint64_t };
-struct shmem_internal_tid
-{
-    enum shmem_internal_tid_t tid_t;
-    union
-    {
-        pid_t pid_val;
-        uint64_t uint64_val;
-    } val;
-};
 
 extern struct fid_ep* shmem_transport_ofi_target_ep;
 extern struct fid_mc *coll_mc;
@@ -98,305 +59,7 @@ extern struct fid_av* shmem_transport_ofi_avfd;
 //extern struct fid_av_set_attr shmem_transport_ofi_avset_attr;
 extern struct fid_av_set* shmem_transport_ofi_avset;
 
-/* Libfabric shenanignas */
 
-
-extern struct fid_fabric*              shmem_transport_ofi_CXI_fabfd;
-extern struct fid_domain*              shmem_transport_ofi_CXI_domain_fd;
-extern struct fid_av*                  shmem_transport_ofi_CXI_avfd;
-extern struct fid_av_set*              shmem_transport_ofi_CXI_avfd_set;
-extern fi_addr_t                       shmem_transport_ofi_CXI_world_addr;
-extern fi_addr_t                       shmem_transport_ofi_CXI_coll_addr;
-extern fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
-extern fi_addr_t                       *shmem_transport_ofi_CXI_addr_table;
-extern struct fid_ep                   *shmem_transport_ofi_CXI_target_ep;
-extern struct fid_cq                   *shmem_transport_ofi_CXI_target_cq;
-extern struct fid_cq                   *shmem_transport_ofi_CXI_recv_cq;
-
-
-typedef union nic_addr {
-    uint64_t value;
-    struct {
-        uint64_t nic:20;
-        uint64_t net:28;
-        uint64_t hsn:2;
-        uint64_t rank:14;
-    } __attribute__((__packed__));
-} nic_addr_t;
-
-
-#define NICSIZE (sizeof(union nic_addr))
-
-#define nodename_len 128
-#define nicname_len 256
-
-
-struct shmem_transport_ctx_t {
-    int                             id;
-#ifdef USE_CTX_LOCK
-    shmem_internal_mutex_t          lock;
-#endif
-    long                            options;
-    struct fid_ep*                  ep;
-    struct fid_cntr*                put_cntr;
-    struct fid_cntr*                get_cntr;
-    struct fid_cq*                  cq;
-#ifdef USE_CTX_LOCK
-    /* Pending cntr accesses are protected by ctx lock */
-    uint64_t                        pending_put_cntr;
-    uint64_t                        pending_get_cntr;
-#else
-    shmem_internal_cntr_t           pending_put_cntr;
-    shmem_internal_cntr_t           pending_get_cntr;
-#endif
-    /* These counters are protected by the BB lock */
-    uint64_t                        pending_bb_cntr;
-    uint64_t                        completed_bb_cntr;
-    shmem_free_list_t              *bounce_buffers;
-    int                             stx_idx;
-    struct shmem_internal_tid       tid;
-    struct shmem_internal_team_t   *team;
-    /* Start Ben items */
-    struct fid_eq*                  eq;
-    int nics_per_rank; /* PMI_NUM_HSNS */
-    const char *nodename; /* SLURMD_NODENAME */
-    const char *unique_secret; /* PMI_SHARED_SECRET */
-    const char *jobid; /* FI_CXI_COLL_JOB_ID or SLURM_JOBID */
-    const char *jobstep; /* FI_CXI_COLL_JOB_STEP_ID */
-    const char *mcast_token; /* FI_CXI_COLL_MCAST_TOKEN */
-    const char *fab_mgr_url; /* FI_CXI_COLL_FABRIC_MGR_URL */
-    char node_0[nodename_len]; /* First name in SLURMD_NODELIST */
-    int addrs_per_job;
-    nic_addr_t *NIC_array;
-    int num_nics;
-    /* End Ben items */
-};
-
-
-typedef struct shmem_transport_ctx_t shmem_transport_ctx_t;
-extern shmem_transport_ctx_t shmem_transport_ctx_default;
-/* Some things taken directly from cxip.h to replicate what exactly is going
- * on/what should be going on */
-
-#define MAX_BITS 9
-#define NIC_BITS 3
-#define PAD 3
-
-typedef struct internal_addr {
-    uint32_t pid:MAX_BITS;
-    uint32_t nic:NIC_BITS;
-    uint32_t pad:PAD;
-    uint16_t vni;
-} internal_addr_t;
-
-extern internal_addr_t myaddr; 
-
-enum shmem_ofi_list_end {
-    SHMEM_LIST_TAIL,
-    SHMEM_LIST_HEAD
-};
-
-typedef struct d_entry {
-    struct d_entry  *next;
-    struct d_entry  *prev;
-}d_entry_t;
-
-
-#define DLIST_INIT(addr) { addr, addr }
-#define DEFINE_LIST(name) struct d_entry name = DLIST_INIT(&name)
-
-static inline void d_init(struct d_entry *head)
-{
-        head->next = head;
-            head->prev = head;
-}
-
-static inline int d_empty(struct d_entry *head)
-{
-        return head->next == head;
-}
-
-
-static inline void
-d_insert_after(struct d_entry *item, struct d_entry *head)
-{
-        item->next = head->next;
-            item->prev = head;
-                head->next->prev = item;
-                    head->next = item;
-}
-
-static inline void
-d_insert_before(struct d_entry *item, struct d_entry *head)
-{
-        d_insert_after(item, head->prev);
-}
-
-#define d_insert_head d_insert_after
-#define d_insert_tail d_insert_before
-
-
-static inline void d_remove(struct d_entry *item)
-{
-    item->prev->next = item->next;
-    item->next->prev = item->prev;
-}
-
-static inline void d_remove_init(struct d_entry *item)
-{
-    d_remove(item);
-    d_init(item);
-}
-
-#define d_first_entry_or_null(head, type, member) ({    \
-        struct d_entry *pos = (head)->next;             \
-        pos != (head) ? container_of((pos), type, member) : NULL;   \
-        })
-
-#define d_pop_front(head, type, container, member)          \
-    do {                                \
-        container = container_of((head)->next, type, member);   \
-        d_remove((head)->next);             \
-    } while (0)
-
-#define d_foreach(head, item)                       \
-    for ((item) = (head)->next; (item) != (head); (item) = (item)->next)
-
-#define d_foreach_reverse(head, item)                   \
-    for ((item) = (head)->prev; (item) != (head); (item) = (item)->prev)
-
-#define d_foreach_container(head, type, container, member)          \
-    for ((container) = container_of((head)->next, type, member);        \
-            &((container)->member) != (head);                  \
-            (container) = container_of((container)->member.next,       \
-                type, member))
-
-#define d_foreach_container_reverse(head, type, container, member)      \
-    for ((container) = container_of((head)->prev, type, member);        \
-            &((container)->member) != (head);                  \
-            (container) = container_of((container)->member.prev,       \
-                type, member))
-
-#define d_foreach_container_reverse_safe(head, type, container, member, tmp)\
-    for ((container) = container_of((head)->prev, type, member),        \
-            (tmp) = (container)->member.prev;                  \
-            &((container)->member) != (head);                  \
-            (container) = container_of((tmp), type, member),           \
-            (tmp) = (container)->member.prev)
-
-typedef int d_func_t(struct d_entry *item, const void *arg);
-
-    static inline int
-d_match_func_same_entry(struct d_entry *item,
-        const void *arg)
-{
-    return item == arg;
-}
-
-    static inline struct d_entry *
-d_find_first_match(struct d_entry *head, d_func_t *match,
-        const void *arg)
-{
-    struct d_entry *item;
-
-    d_foreach(head, item) {
-        if (match(item, arg))
-            return item;
-    }
-
-    return NULL;
-}
-
-    static inline bool
-d_entry_in_list(struct d_entry *head,
-        struct d_entry *entry)
-{
-    if (d_find_first_match(head, &d_match_func_same_entry,
-                (void *) entry))
-        return true;
-
-    return false;
-}
-
-    static inline struct d_entry *
-d_remove_first_match(struct d_entry *head, d_func_t *match,
-        const void *arg)
-{
-    struct d_entry *item;
-
-    item = d_find_first_match(head, match, arg);
-    if (item)
-        d_remove(item);
-
-    return item;
-}
-
-static inline void d_insert_order(struct d_entry *head, d_func_t *order,
-        struct d_entry *entry)
-{
-    struct d_entry *item;
-
-    item = d_find_first_match(head, order, entry);
-    if (item)
-        d_insert_before(entry, item);
-    else
-        d_insert_tail(entry, head);
-}
-
-typedef struct join_item {
-    d_entry_t   entry;
-    struct fid_av_set *avset;
-    struct fid_mc     *mc;
-    int join_index;
-    int prov_errno;
-    int retval;
-} join_item_t;
-
-typedef struct avset_ary {
-    struct fid_av_set **avset;
-    int avset_cnt;
-    int avset_siz;
-} avset_ary_t;
-
-static void avset_ary_init(struct avset_ary *setary)
-{
-    setary->avset = NULL;
-    setary->avset_cnt = 0;
-    setary->avset_siz = 0;
-}
-
-static void avset_ary_destroy(struct avset_ary *setary)
-{
-    int i;
-
-    if (setary->avset) {
-        for (i = 0; i < setary->avset_cnt; i++)
-            fi_close(&setary->avset[i]->fid);
-        free(setary->avset);
-    }
-    avset_ary_init(setary);
-}
-
-
-
-/*End that direct steal */
-
-
-#define NODENAME "SLURMD_NODENAME"
-#define JOBID "FI_CXI_JOB_ID"
-#define JOBSTEP "FI_CXI_COLL_JOB_STEP_ID"
-#define MGR_URL "FI_CXI_COLL_FABRIC_MGR_URL"
-#define MCAST_TOKEN "FI_CXI_COLL_MCAST_TOKEN"
-#define ADDRS_PER_JOB "FI_CXI_HWCOLL_ADDRS_PER_JOB"
-#define MIN_NODES "FI_CXI_HWCOLL_MIN_NODES"
-#define NODELIST "SLURM_NODELIST"
-#define NICS_PER_RANK "PMI_NUM_HSNS"
-
-/* TODO: Currently applies ONLY to libfabrics implementations
- * TODO: ALSO needs Slingshot and OFI setups here 
- */
-
-int shmem_collective_nic_initialization(void);
 
 
 extern fi_addr_t shmem_transport_ofi_world_addr;
@@ -464,9 +127,9 @@ extern int shmem_transport_ofi_single_ep;
     do {                                                                        \
         if ((err) == -FI_EAVAIL) {                                              \
             struct fi_cq_err_entry e = {0};                                     \
-            ssize_t ret = fi_cq_readerr((ctx)->cq, (void *)&e, 0);              \
+            ssize_t ret = fi_cq_readerr((ctx)->tx_cq, (void *)&e, 0);              \
             if (ret == 1) {                                                     \
-                const char *errmsg = fi_cq_strerror((ctx)->cq, e.prov_errno,    \
+                const char *errmsg = fi_cq_strerror((ctx)->tx_cq, e.prov_errno,    \
                                                     e.err_data, NULL, 0);       \
                 RAISE_ERROR_MSG("Error in operation: %s\n", errmsg);            \
             } else {                                                            \
@@ -755,7 +418,7 @@ void shmem_transport_ofi_drain_cq(shmem_transport_ctx_t *ctx)
     struct fi_cq_entry buf;
 
     for (;;) {
-        ret = fi_cq_read(ctx->cq, (void *)&buf, 1);
+        ret = fi_cq_read(ctx->tx_cq, (void *)&buf, 1);
 
         if (ret == -FI_EAGAIN) break; /* No events */
 
@@ -912,9 +575,9 @@ int try_again(shmem_transport_ctx_t *ctx, const int ret, uint64_t *polled) {
             else {
                 /* Poke CQ for errors to encourage progress */
                 struct fi_cq_err_entry e = {0};
-                ssize_t ret = fi_cq_readerr(ctx->cq, (void *)&e, 0);
+                ssize_t ret = fi_cq_readerr(ctx->tx_cq, (void *)&e, 0);
                 if (ret == 1) {
-                    const char *errmsg = fi_cq_strerror(ctx->cq, e.prov_errno,
+                    const char *errmsg = fi_cq_strerror(ctx->tx_cq, e.prov_errno,
                                                         e.err_data, NULL, 0);
                     RAISE_ERROR_MSG("Error in operation: %s\n", errmsg);
                 } else if (ret && ret != -FI_EAGAIN) {
