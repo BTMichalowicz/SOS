@@ -97,7 +97,14 @@ endif
 if USE_OFI
 libsma_la_SOURCES += \
 	transport_ofi.h \
-	transport_ofi.c
+	transport_ofi.c	\
+	shmem_ofi_ctx.h 
+
+# Slingshot only below -- experimental
+libsma_la_SOURCES += \
+	cxi_extension_funcs.h \
+	cxi_extension_funcs.c
+
 endif
 
 if USE_UCX

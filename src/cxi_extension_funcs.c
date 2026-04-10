@@ -1,5 +1,18 @@
-
 #include "cxi_extension_funcs.h"
+struct fid_fabric*              shmem_transport_ofi_CXI_fabfd;
+struct fid_domain*              shmem_transport_ofi_CXI_domain_fd;
+struct fid_av*                  shmem_transport_ofi_CXI_avfd;
+struct fid_av_set*              shmem_transport_ofi_CXI_avfd_set;
+fi_addr_t                       shmem_transport_ofi_CXI_world_addr;
+fi_addr_t                       shmem_transport_ofi_CXI_coll_addr;
+fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
+fi_addr_t                       *shmem_transport_ofi_CXI_addr_table;
+struct fid_ep                   *shmem_transport_ofi_CXI_target_ep;
+struct fid_ep                   *shmem_transport_ofi_CXI_recv_ep;
+struct fid_cq                   *shmem_transport_ofi_CXI_target_cq;
+struct fid_cq                   *shmem_transport_ofi_CXI_recv_cq;
+//fi_addr_t                       *CXI_addr_table;
+
 int wait_for_join(shmem_transport_ctx_t *ctx, uint32_t signal, void *context){
     int err;
     uint32_t event;
@@ -158,8 +171,6 @@ int shmem_collective_nic_initialization(void){
     }
     PRINT_DEBUG("Domain set up\n");
 
-
-
     struct fi_av_attr av_attr = {};
     av_attr.type = FI_AV_TABLE;
 
@@ -171,7 +182,6 @@ int shmem_collective_nic_initialization(void){
         PRINT_ERROR("avfd is null!!\n");
         goto fail;
     }
-
 
 
     err = fi_endpoint(shmem_transport_ofi_CXI_domainfd, shmem_transport_ofi_CXI_info.p_info,
@@ -191,7 +201,23 @@ int shmem_collective_nic_initialization(void){
 
     err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep,
                      &shmem_transport_ofi_CXI_target_cq->fid, FI_SELECTIVE_COMPLETION | FI_TRANSMIT | FI_RECV);
-    OFI_CHECK_RETURN_STR(err, "fi_ep_bind CQ to target endpoint failed");
+    OFI_CHECK_RETURN_STR(err, "fi_ep_bind tx_CQ to target endpoint failed");
+
+     struct fi_cq_attr recv_cq_attr = {
+        .format = FI_CQ_FORMAT_TAGGED
+    };
+
+    ret = fi_cq_open(shmem_transport_ofi_CXI_domainfd, &recv_cq_attr,
+            &shmem_transport_ofi_CXI_recv_cq, NULL);
+    OFI_CHECK_RETURN_MSG(ret, "recv_cq_open failed (%s)\n", fi_strerror(errno));
+
+    PRINT_DEBUG("Binding recv_cq %p to ep %p\n", shmem_transport_ofi_CXI_recv_cq,
+            shmem_transport_ofi_CXI_target_ep);
+    
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep,
+            &shmem_transport_ofi_CXI_recv_cq->fid,  FI_RECV);
+    OFI_CHECK_RETURN_STR(ret, "fi_ep_bind RX_CQ to target endpoint failed");
+
 
     err = fi_enable(shmem_transport_ofi_CXI_target_ep);
     OFI_CHECK_RETURN_STR(err, "fi_enable on target endpoint failed");
@@ -224,6 +250,67 @@ int shmem_collective_nic_initialization(void){
 
     return err;
 
+
+
+ struct cxip_comm_key comm_key = {
+        .keytype = COMM_KEY_UNICAST,
+        .ucast.mcast_addr = 0,
+        .ucast.hwroot_idx = 0
+    };
+
+    struct fi_av_set_attr avset_attr = {
+        .count = 0,
+        .start_addr = FI_ADDR_NOTAVAIL,
+        .end_addr = FI_ADDR_NOTAVAIL,
+        .stride = 1,
+        .comm_key_size = sizeof(comm_key),
+        .comm_key = (void *)&comm_key,
+        .flags = 0,
+    };
+
+    ret = fi_av_set(shmem_transport_ofi_CXI_avfd, &avset_attr, &shmem_transport_ofi_CXI_avfd_et, NULL);
+   OFI_CHECK_RETURN_STR(ret, "AVSET creation failed");
+    PRINT_DEBUG("shmem_transport_ofi_avset done %p\n", shmem_transport_ofi_avset);
+
+    ret = fi_av_set_addr(shmem_transport_ofi_CXI_CXI_avfd_set, &shmem_transport_ofi_CXI_world_addr);
+    OFI_CHECK_RETURN_STR(ret, "World_addr failed");
+    if (shmem_transport_ofi_world_addr == NULL){
+        PRINT_ERROR("world addr is NULL\n");
+        return -FI_EINVAL;
+    }
+
+
+    for (i = 0; i < shmem_internal_num_pes; i++){
+        ret = fi_av_set_insert(shmem_transport_ofi_avset, shmem_transport_ofi_CXI_addr_table[i]);
+        OFI_CHECK_RETURN_STR(ret, "av_set_insert_failed");
+    }
+
+    uint32_t done_flag = 0;
+
+
+    struct fi_eq_attr eq_attr = {
+        .wait_obj = FI_WAIT_UNSPEC
+    };
+
+   ret = fi_eq_open(shmem_transport_ofi_fabfd, &eq_attr, &(shmem_transport_ctx_default.eq), NULL);
+    OFI_CHECK_RETURN_STR(ret, "EQ creation failed\n");
+
+    ret = fi_domain_bind(shmem_transport_ofi_domainfd, &(shmem_transport_ctx_default.eq->fid), 0);
+    OFI_CHECK_RETURN_STR(ret, "Domain binding failed\n");
+
+    PRINT_DEBUG("Coll join with ep %p world_addr %p avset %p\n",
+            ctx->ep, FI_ADDR_NOTAVAIL, shmem_transport_ofi_avset);
+/*    ret = fi_join_collective(ctx->ep, shmem_transport_ofi_world_addr, shmem_transport_ofi_avset,
+            0, &coll_mc, &done_flag);
+
+    OFI_CHECK_RETURN_STR(ret, "coll_join failed");
+
+    PRINT_DEBUG("Coll_mc %p\n", coll_mc);
+
+    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &done_flag);
+    OFI_CHECK_RETURN_STR(ret, "coll_wait failed\n");
+
+*/
 
 fail:
     ctx->num_nics = 0;

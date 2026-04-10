@@ -260,11 +260,10 @@ extern fi_addr_t                       shmem_transport_ofi_CXI_coll_addr;
 extern fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
 extern fi_addr_t                       *shmem_transport_ofi_CXI_addr_table;
 extern struct fid_ep                   *shmem_transport_ofi_CXI_target_ep;
+extern struct fid_ep                   *shmem_transport_ofi_CXI_recv_ep;
 extern struct fid_cq                   *shmem_transport_ofi_CXI_target_cq;
 extern struct fid_cq                   *shmem_transport_ofi_CXI_recv_cq;
-
-
-
+extern  fi_addr_t                      *CXI_addr_table; 
 
 
 int wait_for_join(shmem_transport_ctx_t *ctx, uint32_t signal, void *context); 

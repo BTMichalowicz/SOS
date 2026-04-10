@@ -65,10 +65,8 @@ struct fabric_info {
 struct fid_fabric*              shmem_transport_ofi_fabfd;
 struct fid_domain*              shmem_transport_ofi_domainfd;
 struct fid_av*                  shmem_transport_ofi_avfd;
-//struct fid_av*                  shmem_transport_ofi_coll_avfd;
 struct fid_av_set*              shmem_transport_ofi_avset;
 struct fid_mc                   *coll_mc = NULL;
-//struct fid_av_set_attr          shmem_transport_ofi_avset_attr;
 fi_addr_t                       shmem_transport_ofi_world_addr;
 fi_addr_t                       shmem_transport_ofi_coll_addr;
 
@@ -86,6 +84,7 @@ fi_addr_t                       shmem_transport_ofi_CXI_coll_addr;
 fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
 fi_addr_t                       *shmem_transport_ofi_CXI_addr_table;
 struct fid_ep                   *shmem_transport_ofi_CXI_target_ep;
+struct fid_ep                   *shmem_transport_ofi_CXI_recv_ep;
 struct fid_cq                   *shmem_transport_ofi_CXI_target_cq;
 struct fid_cq                   *shmem_transport_ofi_CXI_recv_cq;
 struct fid_cxi_dom_ops          *cxi_com_ops;
@@ -133,6 +132,7 @@ size_t                          shmem_transport_ofi_addrlen;
 int                             shmem_transport_ofi_mr_rma_event;
 #endif
 fi_addr_t                       *addr_table;
+//fi_addr_t                       *CXI_addr_table;
 #ifdef ENABLE_THREADS
 shmem_internal_mutex_t          shmem_transport_ofi_lock;
 pthread_mutex_t                 shmem_transport_ofi_progress_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -155,7 +155,7 @@ int shmem_transport_ofi_single_ep;
 
 static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
         int mcast_addr, int root_idx,
-        struct avset_ary *setary)
+        struct avset_ary *setary, int stride)
 {
     struct cxip_comm_key comm_key = {
         .keytype = COMM_KEY_UNICAST,
@@ -166,7 +166,7 @@ static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
         .count = 0,
         .start_addr = FI_ADDR_NOTAVAIL,
         .end_addr = FI_ADDR_NOTAVAIL,
-        .stride = 1,
+        .stride = stride,
         .comm_key_size = sizeof(comm_key),
         .comm_key = (void *)&comm_key,
         .flags = 0,
@@ -379,13 +379,13 @@ static struct join_item *coll_single_join(shmem_transport_ctx_t *ctx, fi_addr_t 
         int exp_retval, int exp_prov_errno,
         struct avset_ary *setary,
         struct d_entry *joinlist,
-        const char *msg)
+        const char *msg, int stride)
 {
     struct join_item *jctx = NULL;
     int ret;
 
     avset_ary_init(setary);
-    ret = avset_ary_append(fiaddrs, size, mcast_addr, root_idx, setary);
+    ret = avset_ary_append(fiaddrs, size, mcast_addr, root_idx, setary, stride);
     if (ret) {
         PRINT_ERROR("%s JOIN avset_ary_append()=%d\n", msg, ret);
         goto quit;
@@ -418,12 +418,12 @@ quit:
 
 static int _simple_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
         struct avset_ary *setary,
-        struct d_entry *joinlist)
+        struct d_entry *joinlist, int stride)
 {
     int ret;
 
     avset_ary_init(setary);
-    ret = avset_ary_append(fiaddrs, size, 0, 1, setary);
+    ret = avset_ary_append(fiaddrs, size, 0, 1, setary, stride);
     if (ret)
         return ret;
 
@@ -446,10 +446,6 @@ static uint64_t _simple_get_mc(struct d_entry *joinlist)
     }
     return (uint64_t)jctx->mc;
 }
-
-
-
-
 
 
 /* Taken from transport_ofi.h and putting it here */
@@ -1626,7 +1622,8 @@ int populate_av(void)
     }
 
  //   PRINT_DEBUG("fi_av_insert time!\n");
-    addr_table = malloc (shmem_internal_num_pes * sizeof (fi_addr_t));
+    //addr_table = malloc (shmem_internal_num_pes * sizeof (fi_addr_t));
+    //CXI_addr_table = addr_table; /* basic reference assignment. Easy to remember */
     ret = fi_av_insert(shmem_transport_ofi_avfd,
                        alladdrs,
                        shmem_internal_num_pes,
@@ -1639,7 +1636,7 @@ int populate_av(void)
     }
   //  PRINT_DEBUG("av insert succeeded\n");
 
-    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
+/*    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
 
  struct cxip_comm_key comm_key = {
         .keytype = COMM_KEY_UNICAST,
@@ -1679,10 +1676,10 @@ int populate_av(void)
 
     struct fi_eq_attr eq_attr = {
         .wait_obj = FI_WAIT_UNSPEC
-    };
+    };*/
 
     /* Event queue creation */
-    ret = fi_eq_open(shmem_transport_ofi_fabfd, &eq_attr, &(shmem_transport_ctx_default.eq), NULL);
+ /*   ret = fi_eq_open(shmem_transport_ofi_fabfd, &eq_attr, &(shmem_transport_ctx_default.eq), NULL);
     OFI_CHECK_RETURN_STR(ret, "EQ creation failed\n");
 
     ret = fi_domain_bind(shmem_transport_ofi_domainfd, &(shmem_transport_ctx_default.eq->fid), 0);
@@ -1700,17 +1697,7 @@ int populate_av(void)
     ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &done_flag);
     OFI_CHECK_RETURN_STR(ret, "coll_wait failed\n");
 
-
-
-
-//    fi_addr_t t_a_2 = 0;
-    
-//    for (i = 0; i< shmem_internal_num_pes; i++){
-//        t_a_2 = (uint64_t) (alladdrs+i*shmem_transport_ofi_addrlen); 
-//////        PRINT_DEBUG("Inserting at index %d for address 0x%lx and avset %p\n", i, t_a_2, shmem_transport_ofi_avset);
-//        ret = fi_av_set_insert(shmem_transport_ofi_avset, t_a_2);
-////        OFI_CHECK_RETURN_STR(ret, "av_set_insert failed\n");
-//    }
+*/
 
 
  
@@ -1794,23 +1781,24 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
 
     struct fid_ep *ep = ctx->ep;
- //   PRINT_DEBUG("_simple_join (%p, %d, setary, join_list)\n", /*shmem_transport_ofi_CXI_*/addr_table, PE_size);
- //   ret = _simple_join(ctx, /*shmem_transport_ofi_CXI_*/addr_table, PE_size, &setary, &join_list);
+    PRINT_DEBUG("_simple_join (%p, %d, setary, join_list)\n", /*shmem_transport_ofi_CXI_*/addr_table, PE_size);
+    ret = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, PE_size, &setary, &join_list, PE_stride);
+    if (ret != 0){
+        PRINT_ERROR("BARRIER JOIN FAILED\n");
+        goto quit;
+    }
 
- //   if (ret != 0){
- //       PRINT_ERROR("BARRIER JOIN FAILED\n");
- //       goto quit;
- //   }
-
-    PRINT_DEBUG("Fetching coll_addr with coll_mc %p\n", coll_mc);
-    shmem_transport_ofi_coll_addr = fi_mc_addr(coll_mc); //_simple_get_mc(&join_list);
-    if (shmem_transport_ofi_coll_addr == NULL){
+//    PRINT_DEBUG("Fetching coll_addr with coll_mc %p\n", coll_mc);
+//    shmem_transport_ofi_CXI_coll_addr = fi_mc_addr(coll_mc); //_simple_get_mc(&join_list);
+//    if (shmem_transport_ofi_CXI_coll_addr == NULL){
+    mc = _simple_get_mc(&join_list);
+    if (mc == 0){
         PRINT_ERROR("Barrier MC is invalid\n");
         goto quit;
     }
 
 
-    ret = fi_barrier(ep, shmem_transport_ofi_coll_addr, &context);
+    ret = fi_barrier(ep, mc, &context);
     if (ret == FI_SUCCESS){
         cq_wait(ctx, &context); /* TODO Implement */
     }else{
@@ -2233,23 +2221,23 @@ static int shmem_transport_ofi_target_ep_init(void)
                      &shmem_transport_ofi_target_cq, NULL);
     OFI_CHECK_RETURN_MSG(ret, "target_cq_open failed (%s)\n", fi_strerror(errno));
 
-    struct fi_cq_attr recv_cq_attr = {
+   /* struct fi_cq_attr recv_cq_attr = {
         .format = FI_CQ_FORMAT_TAGGED
     };
 
     ret = fi_cq_open(shmem_transport_ofi_domainfd, &recv_cq_attr,
             &shmem_transport_ofi_recv_cq, NULL);
- OFI_CHECK_RETURN_MSG(ret, "recv_cq_open failed (%s)\n", fi_strerror(errno));
+    OFI_CHECK_RETURN_MSG(ret, "recv_cq_open failed (%s)\n", fi_strerror(errno));*/
 
 
     ret = fi_ep_bind(shmem_transport_ofi_target_ep,
-                     &shmem_transport_ofi_target_cq->fid, FI_SELECTIVE_COMPLETION | FI_TRANSMIT | FI_RECV);
+            &shmem_transport_ofi_target_cq->fid, FI_SELECTIVE_COMPLETION | FI_TRANSMIT | FI_RECV);
     OFI_CHECK_RETURN_STR(ret, "fi_ep_bind TX_CQ to target endpoint failed");
 
-    PRINT_DEBUG("Binding recv_cq %p to ep %p\n", shmem_transport_ofi_recv_cq, shmem_transport_ofi_target_ep);
-   ret = fi_ep_bind(shmem_transport_ofi_target_ep,
-                     &shmem_transport_ofi_recv_cq->fid,  FI_RECV);
- OFI_CHECK_RETURN_STR(ret, "fi_ep_bind RX_CQ to target endpoint failed");
+ /*   PRINT_DEBUG("Binding recv_cq %p to ep %p\n", shmem_transport_ofi_recv_cq, shmem_transport_ofi_target_ep);
+    ret = fi_ep_bind(shmem_transport_ofi_target_ep,
+            &shmem_transport_ofi_recv_cq->fid,  FI_RECV);
+    OFI_CHECK_RETURN_STR(ret, "fi_ep_bind RX_CQ to target endpoint failed");*/
 
 
     ret = fi_enable(shmem_transport_ofi_target_ep);
