@@ -1327,7 +1327,6 @@ shmem_internal_fcollect_linear(void *target, const void *source, size_t len,
 {
     long tmp = 1;
     long completion = 0;
-    PRINT_DEBUG("Here for sub-4-proc case\n");
 
     /* need 1 slot, plus bcast */
     shmem_internal_assert(SHMEM_COLLECT_SYNC_SIZE >= 1 + SHMEM_BCAST_SYNC_SIZE);
