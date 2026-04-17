@@ -715,7 +715,7 @@ shmem_internal_op_to_all_ring(void *target, const void *source, size_t count, si
         free_source = 1;
         source = tmp;
 
-        shmem_internal_sync(PE_start, PE_stride, PE_size, pSync + 2);
+        shmem_internal_sync_sw(PE_start, PE_stride, PE_size, pSync + 2);
     }
 
     /* Perform reduce-scatter:
@@ -1053,7 +1053,7 @@ shmem_internal_scan_linear(void *target, const void *source, size_t count, size_
         free_source = 1;
         source = tmp;
 
-        shmem_internal_sync(PE_start, PE_stride, PE_size, pSync + 2);
+        shmem_internal_sync_sw(PE_start, PE_stride, PE_size, pSync + 2);
     }
 
     if (PE_start == shmem_internal_my_pe) {
@@ -1166,7 +1166,7 @@ shmem_internal_scan_ring(void *target, const void *source, size_t count, size_t 
         free_source = 1;
         source = tmp;
 
-        shmem_internal_sync(PE_start, PE_stride, PE_size, pSync + 2);
+        shmem_internal_sync_sw(PE_start, PE_stride, PE_size, pSync + 2);
     }
 
 

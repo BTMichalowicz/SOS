@@ -220,6 +220,9 @@ int shmem_collective_nic_initialization(void);
         ((type *) ((char *) ptr - offsetof(type, field)))
 #endif
 
+#define BEN_DEBUG 0
+
+#if BEN_DEBUG /* BEN_DEBUG == 1 */
 #ifndef PRINT_DEBUG
 #define PRINT_DEBUG(fmt, args...)                               \
     do {                                                        \
@@ -231,6 +234,11 @@ int shmem_collective_nic_initialization(void);
                         ##args);                                \
     } while(0);
 #endif /* PRINT_DEBUG */
+#else /* BEN_DEBUG != 1 */
+
+#define PRINT_DEBUG(...)
+
+#endif /* BEN_DEBUG */
 
 #ifndef PRINT_ERROR
 #define PRINT_ERROR(fmt, args...)                               \

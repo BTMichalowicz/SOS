@@ -156,7 +156,7 @@ int shmem_transport_ofi_single_ep;
 
 static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
         int mcast_addr, int root_idx,
-        struct avset_ary *setary, int stride)
+        struct avset_ary *setary, int start, int stride)
 {
     struct cxip_comm_key comm_key = {
         .keytype = COMM_KEY_UNICAST,
@@ -164,7 +164,7 @@ static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
         .ucast.hwroot_idx = root_idx
     };
     struct fi_av_set_attr attr = {
-        .count = 0,
+        .count = start,
         .start_addr = FI_ADDR_NOTAVAIL,
         .end_addr = FI_ADDR_NOTAVAIL,
         .stride = stride,
@@ -193,7 +193,7 @@ static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
 
     PRINT_DEBUG("Starting fi_av_set with avfd %p\n", shmem_transport_ofi_avfd);
 
-    ret = fi_av_set(shmem_transport_ofi_avfd, &attr, &setp, NULL);
+    ret = fi_av_set(shmem_transport_ofi_CXI_avfd, &attr, &setp, NULL);
     if (ret) {
         PRINT_ERROR("%s fi_av_set failed %d\n", __func__, ret);
         goto quit;
@@ -205,7 +205,7 @@ static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
     }
     PRINT_DEBUG("av_set returned: %p\n", setp);
 
-    for (i = 0; i < size; i++) {
+    for (i = start; i < size; i+= stride) {
         PRINT_DEBUG("Inserting at index %d of %lu into setp %p at addr 0x%lx\n", i, size, setp, fiaddrs[i]);
         ret = fi_av_set_insert(setp, fiaddrs[i]);
         if (ret) {
@@ -278,21 +278,16 @@ static int eq_poll(shmem_transport_ctx_t *ctx){
 }
 
 
-static void *cq_poll(shmem_transport_ctx_t *ctx, void *pcontext){
+static void *cq_poll(shmem_transport_ctx_t *ctx){
     struct fi_cq_err_entry cq_err = {};
     ssize_t size = 0;
 
     /* Poll once instead of polling per operation */
-    size = fi_cq_read(ctx->tx_cq, &cq_err, 1);
+    size = fi_cq_read(ctx->rx_cq, &cq_err, 1);
     if (size == -FI_EAVAIL)
-        size = fi_cq_readerr(ctx->tx_cq, &cq_err, 1);
+        size = fi_cq_readerr(ctx->rx_cq, &cq_err, 1);
     if (size > 0)
         return cq_err.op_context;
-//    if (size > 0){
-        /* Event seen! */
-//    } else if (size != -FI_EAGAIN){
-        /* ERROR seen -- wait do we really need these bits? */
-//    }
 
     size = fi_cq_read(ctx->tx_cq, &cq_err, 1);
     if (size == -FI_EAVAIL)
@@ -305,7 +300,7 @@ static void *cq_poll(shmem_transport_ctx_t *ctx, void *pcontext){
 
 static void cq_wait(shmem_transport_ctx_t *ctx, void *pcontext){
     do {
-        if (pcontext == cq_poll(ctx, pcontext))
+        if (pcontext == cq_poll(ctx))
             break;
     } while(true);
 }
@@ -315,6 +310,7 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
 {
     struct join_item *jctx;
     int i, ret, total, count;
+    fi_addr_t local_world_addr;
 
     PRINT_DEBUG("ENTRY %s\n", __func__);
     total = setary->avset_cnt;
@@ -327,13 +323,15 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
             ret = -FI_ENOMEM;
             goto fail;
         }
+        ret = fi_av_set_addr(setary->avset[i], &local_world_addr);
+        OFI_CHECK_RETURN_STR(ret, "fi_av_set_attr failed\n");
         d_init(&jctx->entry);
         jctx->join_index = i;
         jctx->avset = setary->avset[i];
         struct fid_ep *ep = ctx->CXI_ep; 
         PRINT_DEBUG("join %d of %d initiating with ep %p avset %p, mc entry %p, jctx %p\n", i, total,
                 ep, setary->avset[i], jctx->mc, jctx);
-        ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
+        ret = fi_join_collective(ep, &local_world_addr,
                 setary->avset[i], 0L, &jctx->mc, jctx);
 
         if (ret == -FI_ECONNREFUSED) {
@@ -341,13 +339,20 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
             continue;
         }
         if (ret != FI_SUCCESS) {
-            PRINT_ERROR("join %d FAILED join %d\n", i, ret);
+            PRINT_ERROR("join %d FAILED join %d, %s\n", i, ret, fi_strerror(ret));
             free(jctx);
             goto fail;
         }
         PRINT_DEBUG("Actual join succeeded, polling time\n");
 
-        ret = wait_for_join(ctx, FI_JOIN_COMPLETE, jctx);
+        do {
+            cq_poll(ctx);
+            ret = eq_poll(ctx);
+        } while (ret == -FI_EAGAIN);
+
+        OFI_CHECK_RETURN_STR(ret, "Failed to poll EQ\n");
+
+        //ret = wait_for_join(ctx, FI_JOIN_COMPLETE, jctx);
       /*  do {
             PRINT_DEBUG("Polling on ctx %p\n", jctx);
             cq_poll(ctx, jctx); //poll_cqs();
@@ -380,13 +385,13 @@ static struct join_item *coll_single_join(shmem_transport_ctx_t *ctx, fi_addr_t 
         int exp_retval, int exp_prov_errno,
         struct avset_ary *setary,
         struct d_entry *joinlist,
-        const char *msg, int stride)
+        const char *msg, int stride, int start)
 {
     struct join_item *jctx = NULL;
     int ret;
 
     avset_ary_init(setary);
-    ret = avset_ary_append(fiaddrs, size, mcast_addr, root_idx, setary, stride);
+    ret = avset_ary_append(fiaddrs, size, mcast_addr, root_idx, setary, stride, start);
     if (ret) {
         PRINT_ERROR("%s JOIN avset_ary_append()=%d\n", msg, ret);
         goto quit;
@@ -419,17 +424,20 @@ quit:
 
 static int _simple_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t size,
         struct avset_ary *setary,
-        struct d_entry *joinlist, int stride)
+        struct d_entry *joinlist, int stride, int start)
 {
     int ret;
 
     avset_ary_init(setary);
-    ret = avset_ary_append(fiaddrs, size, 0, 1, setary, stride);
+    ret = avset_ary_append(fiaddrs, size, 0, 1, setary, start, stride);
+    OFI_CHECK_RETURN_STR(ret, "Failed to add to the avset\n");
     if (ret)
         return ret;
 
     d_init(joinlist);
     ret = coll_multi_join(ctx, setary, joinlist, -1);
+
+    OFI_CHECK_RETURN_STR(ret, "Failed to perform a join\n");
     if (ret < 0)
         return ret;
 
@@ -1780,7 +1788,7 @@ int initialize_avset(int PE_start, int PE_stride, int PE_size){
 
 
     int pe_count = 0;
-    for (i = PE_start; pe_count < shmem_internal_num_pes && i < PE_size; i += PE_stride){
+    for (i = PE_stride; pe_count < shmem_internal_num_pes && i < PE_size; i += PE_stride){
         PRINT_DEBUG("Iter %d Using addr 0x%lx, avset %p\n", i, shmem_transport_ofi_CXI_addr_table[i],
                 shmem_transport_ofi_CXI_avfd_set);
         usleep(100000);
@@ -1807,7 +1815,27 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
     
     int ret = FI_SUCCESS;
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
+#if 0
+    struct fid_ep *ep = ctx->CXI_ep;
 
+    avset_ary_t setary;
+    d_entry_t joinlist;
+    uint64_t context;
+    uint64_t mc; 
+    ret = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, PE_size,
+            &setary, &joinlist, PE_stride, PE_start);
+
+    OFI_CHECK_ERROR_MSG(ret, "Failed to perform a join %d: %s\n", ret, fi_strerror(ret));
+
+    mc = _simple_get_mc(&joinlist);
+    OFI_CHECK_ERROR_MSG(!mc, "Failed to get the MC for barrier\n");
+
+    ret = fi_barrier(ep, mc, &context);
+    OFI_CHECK_ERROR_MSG(ret, "Failed to barrier: %d %s\n", ret, fi_strerror(ret));
+    cq_wait(ctx, &context);
+
+
+#else
     uint64_t done_flag = 0;
 
     struct fid_ep *ep = ctx->CXI_ep;
@@ -1843,6 +1871,7 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
 
     ret = polling_time(ctx, &done_flag);
     OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
+#endif
 
 }
 

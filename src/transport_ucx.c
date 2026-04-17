@@ -79,6 +79,11 @@ static void * shmem_transport_ucx_progress_thread_func(void *arg)
     return NULL;
 }
 
+
+void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_Size, long *pSync){
+    OFI_CHECK_ERROR_MSG(-EINVAL, "UCX-based HW selection not implemented\n");
+}
+
 int shmem_transport_init(void)
 {
     ucs_status_t status;

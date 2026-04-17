@@ -144,7 +144,7 @@ shmem_internal_barrier(int PE_start, int PE_stride, int PE_size, long *pSync)
 {
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
     PRINT_DEBUG("Internal sync here\n");
-    shmem_internal_sync(PE_start, PE_stride, PE_size, pSync);
+    shmem_internal_sync_sw(PE_start, PE_stride, PE_size, pSync);
 }
 
 
