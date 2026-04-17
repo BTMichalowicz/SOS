@@ -1,9 +1,7 @@
 #ifndef _CXI_EXTENSION_FUNCS_H_
 #define _CXI_EXTENSION_FUNCS_H_
 
-
 #include "shmem_ofi_ctx.h"
-
 
 extern internal_addr_t myaddr; 
 

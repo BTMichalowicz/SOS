@@ -295,13 +295,10 @@ shmem_malloc(size_t size)
     ret = dlmalloc(size);
     SHMEM_MUTEX_UNLOCK(shmem_internal_mutex_alloc);
 
-    PRINT_DEBUG("Internal quiet for malloc\n");
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
-    PRINT_DEBUG("Internal sync inside malloc\n");
     shmem_internal_sync_sw(0, 1, shmem_internal_num_pes,
             shmem_internal_barrier_all_psync);
 
-    PRINT_DEBUG("Leaving\n");
     return ret;
 }
 
@@ -319,9 +316,7 @@ shmem_calloc(size_t count, size_t size)
     SHMEM_MUTEX_UNLOCK(shmem_internal_mutex_alloc);
 
 
-    PRINT_DEBUG("Calloc quiet\n");
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
-    PRINT_DEBUG("Calloc sync\n");
     shmem_internal_sync_sw(0, 1, shmem_internal_num_pes,
             shmem_internal_barrier_all_psync);
 
@@ -336,12 +331,9 @@ shmem_free(void *ptr)
       SHMEM_ERR_CHECK_SYMMETRIC_HEAP(ptr);
     }
 
-//    PRINT_DEBUG("Entering quiet\n");
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
-//    PRINT_DEBUG("Entering internal sync_tree\n");
     shmem_internal_sync_sw(0, 1, shmem_internal_num_pes,
             shmem_internal_barrier_all_psync);
-//    shmem_internal_barrier_all();
 
     shmem_internal_free(ptr);
 }

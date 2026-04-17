@@ -17,7 +17,9 @@
 #include <unistd.h>
 #include <stddef.h>
 #include <inttypes.h>
-
+#include "shmem.h"
+#include "shmem_internal.h"
+#include "shmem_free_list.h"
 #include <sys/types.h>
 #include <rdma/fi_cxi_ext.h>
 #include <rdma/fi_collective.h>
@@ -73,6 +75,7 @@ struct shmem_transport_ctx_t {
 #endif
     long                            options;
     struct fid_ep*                  ep;
+    struct fid_ep*                  CXI_ep;
     struct fid_cntr*                put_cntr;
     struct fid_cntr*                get_cntr;
     struct fid_cq*                  tx_cq;
