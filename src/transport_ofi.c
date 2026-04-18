@@ -1860,6 +1860,30 @@ static inline enum fi_datatype find_type_name (char *dtype_string, int len, int 
     return FI_VOID;
 }
 
+static inline int batch_polling_time (shmem_transport_ctx_t *ctx, void **contexts, 
+        int nctx, const int max_inflight){
+
+    int done = 0, i = 0;
+    int16_t seen[max_inflight];
+    memset(seen, 0, max_inflight *sizeof(int16_t));
+
+    while (done < nctx) {
+        void *got = cq_poll(ctx);
+        if (got == NULL){
+            continue;
+        }
+
+        for (i = 0; i< nctx; i++) {
+            if (seen[i] == 0 && got == contexts[i]){
+                seen[i] == 1;
+                done++;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
 void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                             int PE_root, int PE_start, int PE_stride, int PE_size,
                             long *pSync, int complete){
@@ -1880,7 +1904,20 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
     }
 
     nelems = len / coll_type_arr[idx].size;
-    uint64_t context;
+    int sz = coll_type_arr[idx].size;
+    uint64_t context = 0;
+    const int max_inflight = 8;
+    uint64_t contexts[max_inflight];
+    void    *context_peers[max_inflight];
+
+    memset(contexts, 0, max_inflight * sizeof(uint64_t));
+    memset(context_peers, NULL, sizeof(void *)*max_inflight);
+    int offset = 0;
+    int posted = 0;
+    size_t cur_count = 0;
+    int chunk_elems = 32/coll_type_arr[idx].size; 
+    /* Can do 32 bytes for a given item. May increase to 256 later? */
+
     
 #if 0
     avset_ary_t setary;
@@ -1906,8 +1943,7 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
 
 
 #else
-
-
+ 
     ret = initialize_avset(PE_start, PE_stride, PE_size);
     OFI_CHECK_ERROR_MSG(ret, "failed to initialize avset: %d %s", ret, fi_strerror(ret));
 
@@ -1930,15 +1966,42 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
 
     shmem_transport_ofi_CXI_coll_addr = fi_mc_addr(ofi_coll_mc);
 
+    while (offset < len) {
+        posted = 0;
+        while (posted < max_inflight && offset < len) { 
+            cur_count = len - offset;
+            if (cur_count > chunk_elems)
+                cur_count = chunk_elems;
 
-    ret = fi_broadcast(ep, target, nelems, NULL, shmem_transport_ofi_CXI_coll_addr, 
-            shmem_transport_ofi_CXI_addr_table[PE_root],
-            dtype, 0L,
-            &context);
-  OFI_CHECK_ERROR_MSG(ret, "Bcast failed: %d %s\n", ret, fi_strerror(ret));
-
-    ret = polling_time(ctx, &context);
-    OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
+            context_peers[posted] = &contexts[posted];
+            if (shmem_my_pe() == PE_root){
+                memcpy(&target[offset], &source[offset], cur_count * sz);
+            }
+            
+            ret = fi_broadcast(ep, &target[offset], cur_count, NULL,
+                    shmem_transport_ofi_CXI_coll_addr, 
+                    shmem_transport_ofi_CXI_addr_table[PE_root],
+                    dtype, 0L,
+                    context_peers[posted]);
+            if (ret == -FI_EAGAIN){
+                if (posted > 0){
+                    batch_polling_time(ctx, context_peers, posted, max_inflight);
+                    posted = 0;
+                    continue;
+                }
+                do {
+                } while(cq_poll(ctx) == NULL);
+            }
+            OFI_CHECK_ERROR_MSG(ret, "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+            offset += cur_count;
+            posted++;
+        }
+        if (posted > 0){
+            batch_polling_time(ctx, context_peers, posted, max_inflight);
+        }
+//            ret = polling_time(ctx, &context);
+//            OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
+    }
 
 
 
