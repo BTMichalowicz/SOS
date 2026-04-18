@@ -445,7 +445,9 @@ shmem_internal_bcast_hw_accel(void *target, const void *source, size_t len,
                             int PE_root, int PE_start, int PE_stride, int PE_size,
                             long *pSync, int complete)
 {
-    return;
+    shmem_transport_coll_bcast(target, source, len,
+                            PE_root, PE_start, PE_stride, PE_size,
+                            pSync, complete);
 
 }
 

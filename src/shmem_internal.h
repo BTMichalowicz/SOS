@@ -51,6 +51,11 @@ extern int shmem_external_heap_device;
 
 extern unsigned int shmem_internal_rand_seed;
 
+
+extern unsigned int coll_dtype_size;
+#define coll_dtype_str_len 64
+extern char coll_type_string[coll_dtype_str_len];
+
 #ifdef USE_HWLOC
 #include <hwloc.h>
 extern hwloc_topology_t shmem_internal_topology;

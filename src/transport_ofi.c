@@ -459,9 +459,6 @@ static uint64_t _simple_get_mc(struct d_entry *joinlist)
 
 /* Taken from transport_ofi.h and putting it here */
 
-
-
-
 int shmem_transport_dtype_table[] = {
     FI_INT8,                  /* SHM_INTERNAL_SIGNED_BYTE    */
     DTYPE_CHAR,               /* SHM_INTERNAL_CHAR           */
@@ -555,6 +552,45 @@ size_t SHMEM_Dtsize[FI_DATATYPE_LAST];
 
 static char * SHMEM_DtName[FI_DATATYPE_LAST];
 static char * SHMEM_OpName[FI_ATOMIC_OP_LAST];
+
+// Corresponds to Table 5 in the OpenSHMEM standard
+#define OSHMEM_STANDARD_len 24
+
+typedef struct shmem_coll_types {
+    const char *type;
+    enum fi_datatype match;
+    int size;
+} shmem_coll_types_t;
+
+static shmem_coll_types_t coll_type_arr[] = { 
+    { "float", FI_FLOAT, sizeof(float) },
+    { "double", FI_DOUBLE, sizeof(double) },
+    { "longdouble", FI_LONG_DOUBLE, sizeof (long double) },
+    { "char", FI_INT8, sizeof(char) },
+    { "schar", FI_INT8, sizeof(signed char) },
+    { "short", FI_INT16, sizeof(short) },
+    { "int", FI_INT32, sizeof(int) },
+    { "long", FI_INT32, sizeof(long) },
+    { "longlong", FI_INT64, sizeof(long long) },
+    { "uchar", FI_UINT8, sizeof(unsigned char) },
+    { "ushort", FI_UINT16, sizeof(unsigned short) },
+    { "uint", FI_UINT32, sizeof(unsigned int) },
+    { "ulong", FI_UINT32, sizeof(unsigned long) },
+    { "ulonglong", FI_UINT32, sizeof(unsigned long long) },
+    { "int8", FI_INT8, sizeof(int8_t) },
+    { "int16", FI_INT16, sizeof(int16_t) },
+    { "int32", FI_INT32, sizeof(int32_t) },
+    { "int64", FI_INT64, sizeof(int64_t) },
+    { "uint8", FI_UINT8, sizeof(uint8_t) },
+    { "uint16", FI_UINT16, sizeof(uint16_t) },
+    { "uint32", FI_UINT32, sizeof(uint32_t) },
+    { "uint64", FI_UINT64, sizeof(uint64_t) },
+    { "size", FI_UINT64, sizeof(size_t) },
+    { "ptrdiff", FI_INT64, sizeof(ptrdiff_t) }
+};
+
+
+
 
 static inline void init_ofi_tables(void)
 {
@@ -1810,6 +1846,106 @@ int initialize_avset(int PE_start, int PE_stride, int PE_size){
     return err;
 }
 
+static inline enum fi_datatype find_type_name (char *dtype_string, int len, int *idx){
+    int i = 0;
+    enum fi_datatype ret = FI_VOID;
+    for (i = 0; i < OSHMEM_STANDARD_len ; i++){
+        if (strncmp(dtype_string, coll_type_arr[i].type, len) == 0 ){
+            *idx = i;
+            ret = coll_type_arr[i].match;
+            return ret;
+        }
+    }
+//    OFI_CHECK_ERROR_MSG(-FI_EINVAL, "Unsupported datatype: %s\n", dtype_string);
+    return FI_VOID;
+}
+
+void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
+                            int PE_root, int PE_start, int PE_stride, int PE_size,
+                            long *pSync, int complete){
+
+    int ret = FI_SUCCESS;
+    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
+    struct fid_ep *ep = ctx->CXI_ep;
+
+    unsigned int nelems=0;
+    int idx = 0;
+    enum fi_datatype dtype;
+
+    dtype = find_type_name(coll_type_string, strlen(coll_type_string), &idx);
+
+    if (dtype == FI_VOID){
+        PRINT_ERROR("WARNING: Unsupported datatype for broadcast.\n");
+        shmem_global_exit(-FI_EINVAL);
+    }
+
+    nelems = len / coll_type_arr[idx].size;
+    uint64_t context;
+    
+#if 0
+    avset_ary_t setary;
+    d_entry_t joinlist;
+
+    uint64_t mc; 
+    ret = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, PE_size,
+            &setary, &joinlist, PE_stride, PE_start);
+
+    OFI_CHECK_ERROR_MSG(ret, "Failed to perform a join %d: %s\n", ret, fi_strerror(ret));
+
+    mc = _simple_get_mc(&joinlist);
+    OFI_CHECK_ERROR_MSG(!mc, "Failed to get the MC for bcast\n");
+
+    
+
+    ret = fi_broadcast(ep, target, nelems, NULL, mc, 
+            shmem_transport_ofi_CXI_addr_table[PE_root],
+            dtype, 0L,
+            &context);
+    OFI_CHECK_ERROR_MSG(ret, "Failed to bcast: %d %s\n", ret, fi_strerror(ret));
+    cq_wait(ctx, &context);
+
+
+#else
+
+
+    ret = initialize_avset(PE_start, PE_stride, PE_size);
+    OFI_CHECK_ERROR_MSG(ret, "failed to initialize avset: %d %s", ret, fi_strerror(ret));
+
+
+    PRINT_DEBUG("Starting collective join\n");
+    ret = fi_join_collective(ep, shmem_transport_ofi_CXI_world_addr,
+                             shmem_transport_ofi_CXI_avfd_set,
+                             0, &ofi_coll_mc, &context);
+
+    OFI_CHECK_RETURN_STR(ret, "collective_join failed!!");
+
+    if (ofi_coll_mc == NULL){
+        PRINT_ERROR("coll_mc is NULL\n");
+        shmem_global_exit(-FI_EINVAL);
+    }
+    PRINT_DEBUG("Coll_mc %p\n", ofi_coll_mc);
+
+    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
+    OFI_CHECK_RETURN_STR(ret, "join_wait time failed\n");
+
+    shmem_transport_ofi_CXI_coll_addr = fi_mc_addr(ofi_coll_mc);
+
+
+    ret = fi_broadcast(ep, target, nelems, NULL, shmem_transport_ofi_CXI_coll_addr, 
+            shmem_transport_ofi_CXI_addr_table[PE_root],
+            dtype, 0L,
+            &context);
+  OFI_CHECK_ERROR_MSG(ret, "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+
+    ret = polling_time(ctx, &context);
+    OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
+
+
+
+#endif /*if 0 for bcast */
+
+}
+
 
 void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
     
@@ -1867,7 +2003,7 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
 
 
     ret = fi_barrier(ep, shmem_transport_ofi_CXI_coll_addr, &done_flag);
-    OFI_CHECK_RETURN_STR(ret, "Barrier failed\n");
+    OFI_CHECK_ERROR_MSG(ret, "Barrier failed %d %s\n", ret, fi_strerror(ret));
 
     ret = polling_time(ctx, &done_flag);
     OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
