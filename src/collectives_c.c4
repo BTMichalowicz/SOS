@@ -173,6 +173,7 @@ shmem_barrier_all(void)
     shmem_internal_barrier_all();
 }
 
+char coll_type_string[coll_dtype_str_len];
 
 void SHMEM_FUNCTION_ATTRIBUTES
 shmem_barrier(int PE_start, int logPE_stride, int PE_size, long *pSync)
@@ -389,6 +390,7 @@ shmem_broadcastmem(shmem_team_t team, void *dest, const void *source,
 
     shmem_internal_team_t *myteam = (shmem_internal_team_t *)team;
     long *psync = shmem_internal_team_choose_psync(myteam, BCAST);
+    memcpy(coll_type_string, "char", strlen("char"));
     shmem_internal_bcast(dest, source, nelems, PE_root, myteam->start,
                          myteam->stride, myteam->size,
                          psync, 1);
@@ -399,7 +401,6 @@ shmem_broadcastmem(shmem_team_t team, void *dest, const void *source,
     return 0;
 }
 
-char coll_type_string[coll_dtype_str_len];
 #define SHMEM_DEF_BCAST(STYPE,TYPE)                                     \
     int SHMEM_FUNCTION_ATTRIBUTES                                       \
     shmem_##STYPE##_broadcast(shmem_team_t team, TYPE *dest,            \

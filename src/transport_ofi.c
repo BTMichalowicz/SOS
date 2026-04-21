@@ -215,6 +215,7 @@ static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
     }
     // add to expanded list
     setary->avset[setary->avset_cnt++] = setp;
+    PRINT_DEBUG("avset_cnt %d, setary->avset[setary->avset_cnt-1] = %p\n", setary->avset_cnt, setary->avset[setary->avset_cnt-1]);
     return 0;
 
 quit:
@@ -329,9 +330,10 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
         jctx->join_index = i;
         jctx->avset = setary->avset[i];
         struct fid_ep *ep = ctx->CXI_ep; 
-        PRINT_DEBUG("join %d of %d initiating with ep %p avset %p, mc entry %p, jctx %p\n", i, total,
-                ep, setary->avset[i], jctx->mc, jctx);
-        ret = fi_join_collective(ep, &local_world_addr,
+        PRINT_DEBUG("join %d of %d initiating with ep %p, local_world_addr 0x%lx avset %p, Pointer mc entry %p, jctx %p\n", i, total,
+                ep, local_world_addr, 
+                setary->avset[i], &jctx->mc, jctx);
+        ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
                 setary->avset[i], 0L, &jctx->mc, jctx);
 
         if (ret == -FI_ECONNREFUSED) {
@@ -352,19 +354,6 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
 
         OFI_CHECK_RETURN_STR(ret, "Failed to poll EQ\n");
 
-        //ret = wait_for_join(ctx, FI_JOIN_COMPLETE, jctx);
-      /*  do {
-            PRINT_DEBUG("Polling on ctx %p\n", jctx);
-            cq_poll(ctx, jctx); //poll_cqs();
-            PRINT_DEBUG("eq_poll, hoping for either -FI_EAGAIN %ld or FI_SUCCESS %d...\n", -FI_EAGAIN, FI_SUCCESS);
-            ret = eq_poll(ctx);
-            PRINT_DEBUG("eq_poll result: %d\n", ret);
-        } while (ret == -FI_EAGAIN); 
-        if (ret < 0) {
-            PRINT_ERROR("join %d FAILED eq poll %d\n", i, ret);
-            free(jctx);
-            goto fail;
-        }*/
         d_insert_tail(&jctx->entry, joinlist);
         count++;
     }
@@ -1919,7 +1908,7 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
     /* Can do 32 bytes for a given item. May increase to 256 later? */
 
     
-#if 0
+#if 1
     avset_ary_t setary;
     d_entry_t joinlist;
 
@@ -1932,14 +1921,45 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
     mc = _simple_get_mc(&joinlist);
     OFI_CHECK_ERROR_MSG(!mc, "Failed to get the MC for bcast\n");
 
-    
+   
 
-    ret = fi_broadcast(ep, target, nelems, NULL, mc, 
-            shmem_transport_ofi_CXI_addr_table[PE_root],
-            dtype, 0L,
-            &context);
-    OFI_CHECK_ERROR_MSG(ret, "Failed to bcast: %d %s\n", ret, fi_strerror(ret));
-    cq_wait(ctx, &context);
+
+    while (offset < len) {
+        posted = 0;
+        while (posted < max_inflight && offset < len) { 
+            cur_count = len - offset;
+            if (cur_count > chunk_elems)
+                cur_count = chunk_elems;
+
+            context_peers[posted] = &contexts[posted];
+            if (shmem_my_pe() == PE_root){
+                memcpy(&target[offset], &source[offset], cur_count * sz);
+            }
+            
+            ret = fi_broadcast(ep, &target[offset], cur_count, NULL,
+                    mc, 
+                    shmem_transport_ofi_CXI_addr_table[PE_root],
+                    dtype, 0L,
+                    context_peers[posted]);
+            if (ret == -FI_EAGAIN){
+                if (posted > 0){
+                    batch_polling_time(ctx, context_peers, posted, max_inflight);
+                    posted = 0;
+                    continue;
+                }
+                do {
+                } while(cq_poll(ctx) == NULL);
+            }
+            OFI_CHECK_ERROR_MSG(ret, "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+            offset += cur_count;
+            posted++;
+        }
+        if (posted > 0){
+            batch_polling_time(ctx, context_peers, posted, max_inflight);
+        }
+//            ret = polling_time(ctx, &context);
+//            OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
+    }
 
 
 #else
@@ -1949,20 +1969,27 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
 
 
     PRINT_DEBUG("Starting collective join\n");
-    ret = fi_join_collective(ep, shmem_transport_ofi_CXI_world_addr,
+    ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
                              shmem_transport_ofi_CXI_avfd_set,
                              0, &ofi_coll_mc, &context);
 
-    OFI_CHECK_RETURN_STR(ret, "collective_join failed!!");
+    if (ret != FI_SUCCESS){
+        PRINT_ERROR("Collective join failed!! %d %s\n", ret, fi_strerror(ret));
+    }
 
+    PRINT_DEBUG("Heading to wait_for_join...\n");
+
+ //   OFI_CHECK_RETURN_MSG(ret, "collective_join failed!! %d %s", ret, fi_strerror(ret));
+
+    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
+    OFI_CHECK_RETURN_STR(ret, "join_wait time failed\n");
     if (ofi_coll_mc == NULL){
         PRINT_ERROR("coll_mc is NULL\n");
         shmem_global_exit(-FI_EINVAL);
     }
     PRINT_DEBUG("Coll_mc %p\n", ofi_coll_mc);
 
-    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
-    OFI_CHECK_RETURN_STR(ret, "join_wait time failed\n");
+
 
     shmem_transport_ofi_CXI_coll_addr = fi_mc_addr(ofi_coll_mc);
 
@@ -2051,16 +2078,22 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
                              shmem_transport_ofi_CXI_avfd_set,
                              0, &ofi_coll_mc, &done_flag);
 
-    OFI_CHECK_RETURN_STR(ret, "collective_join failed!!");
+    if (ret != FI_SUCCESS){
+        PRINT_ERROR("collective join failed %d %s\n", ret, fi_strerror(ret));
+    }
+
+    //OFI_CHECK_RETURN_MSG(ret, "collective_join failed!! %d %s\n", ret, fi_strerror(ret));
+
+    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &done_flag);
+    OFI_CHECK_RETURN_STR(ret, "join_wait time failed\n");
 
     if (ofi_coll_mc == NULL){
         PRINT_ERROR("coll_mc is NULL\n");
         shmem_global_exit(-FI_EINVAL);
     }
-    PRINT_DEBUG("Coll_mc %p\n", ofi_coll_mc);
+//    PRINT_DEBUG("Coll_mc %p\n", ofi_coll_mc);
 
-    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &done_flag);
-    OFI_CHECK_RETURN_STR(ret, "join_wait time failed\n");
+    polling_time(ctx, &done_flag);
 
     shmem_transport_ofi_CXI_coll_addr = fi_mc_addr(ofi_coll_mc);
 
@@ -2642,7 +2675,7 @@ int shmem_collective_nic_initialization(void){
     OFI_CHECK_RETURN_STR(err, "fi_av_lookup test failed\n");
 
     struct fi_eq_attr eq_attr = {
-        .size = 32,
+        .size = 128,
         .flags = FI_WRITE,
         .wait_obj = FI_WAIT_NONE
     };

@@ -101,9 +101,9 @@ libsma_la_SOURCES += \
 	shmem_ofi_ctx.h 
 
 # Slingshot only below -- experimental
-#libsma_la_SOURCES += \
-#	cxi_extension_funcs.h \
-#	cxi_extension_funcs.c
+libsma_la_SOURCES += \
+	cxi_extension_funcs.h \
+	cxi_extension_funcs.c
 
 endif
 
