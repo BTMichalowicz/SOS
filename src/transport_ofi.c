@@ -330,9 +330,10 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
         jctx->join_index = i;
         jctx->avset = setary->avset[i];
         struct fid_ep *ep = ctx->CXI_ep; 
-        PRINT_DEBUG("join %d of %d initiating with ep %p, local_world_addr 0x%lx avset %p, Pointer mc entry %p, jctx %p\n", i, total,
+        PRINT_DEBUG("join %d of %d initiating with ep %p, local_world_addr 0x%lx avset %p, Pointer mc entry %p, jctx %p, FI_ADDR_NOTAVAIL %d\n", 
+                i, total,
                 ep, local_world_addr, 
-                setary->avset[i], &jctx->mc, jctx);
+                setary->avset[i], &(jctx->mc), jctx, FI_ADDR_NOTAVAIL);
         ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
                 setary->avset[i], 0L, &jctx->mc, jctx);
 
@@ -418,7 +419,7 @@ static int _simple_join(shmem_transport_ctx_t *ctx, fi_addr_t *fiaddrs, size_t s
     int ret;
 
     avset_ary_init(setary);
-    ret = avset_ary_append(fiaddrs, size, 0, 1, setary, start, stride);
+    ret = avset_ary_append(fiaddrs, size, 0, 0, setary, start, stride);
     OFI_CHECK_RETURN_STR(ret, "Failed to add to the avset\n");
     if (ret)
         return ret;
@@ -1829,6 +1830,10 @@ int initialize_avset(int PE_start, int PE_stride, int PE_size){
         PRINT_ERROR("world addr is NULL\n");
         return -FI_EINVAL;
     }
+    if (shmem_transport_ofi_CXI_world_addr == 0xffffffff){
+        PRINT_ERROR("World addr is garbage value\n");
+        return -FI_EINVAL;
+    }
 
     PRINT_DEBUG ("world_addr 0x%lx\n", shmem_transport_ofi_CXI_world_addr);
 
@@ -1922,8 +1927,6 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
     OFI_CHECK_ERROR_MSG(!mc, "Failed to get the MC for bcast\n");
 
    
-
-
     while (offset < len) {
         posted = 0;
         while (posted < max_inflight && offset < len) { 
@@ -1957,8 +1960,6 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
         if (posted > 0){
             batch_polling_time(ctx, context_peers, posted, max_inflight);
         }
-//            ret = polling_time(ctx, &context);
-//            OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
     }
 
 
@@ -2041,7 +2042,7 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
     
     int ret = FI_SUCCESS;
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
-#if 0
+#if 1
     struct fid_ep *ep = ctx->CXI_ep;
 
     avset_ary_t setary;
@@ -2074,7 +2075,7 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
 
 
     PRINT_DEBUG("Starting collective join\n");
-    ret = fi_join_collective(ep, shmem_transport_ofi_CXI_world_addr,
+    ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
                              shmem_transport_ofi_CXI_avfd_set,
                              0, &ofi_coll_mc, &done_flag);
 
@@ -2159,7 +2160,7 @@ int query_for_fabric_collectives(struct fabric_info *info)
                  //  FI_ATOMIC;  /* request atomics capability */
     hints.caps  |= FI_COLLECTIVE; /* Requesting collective support for MR's and EP's */
 #if ENABLE_TARGET_CNTR
-    hints.caps |= FI_RMA_EVENT; /* want to use remote counters */
+//    hints.caps |= FI_RMA_EVENT; /* want to use remote counters */
 #endif /* ENABLE_TARGET_CNTR */
 #ifdef USE_FI_FENCE
     hints.caps |= FI_FENCE;     /* request fence capability; FI_FENCE adds
@@ -2180,7 +2181,7 @@ int query_for_fabric_collectives(struct fabric_info *info)
                                 /* Scalable, offset-based addressing, formerly FI_MR_SCALABLE */
     domain_attr.mr_mode       = 0;
 #  if !defined(ENABLE_HARD_POLLING) && defined(ENABLE_MR_RMA_EVENT)
-    domain_attr.mr_mode       = FI_MR_RMA_EVENT; /* can support RMA_EVENT on MR */
+   // domain_attr.mr_mode       = FI_MR_RMA_EVENT; /* can support RMA_EVENT on MR */
 #  endif
 #else
                                 /* Portable, absolute addressing, formerly FI_MR_BASIC */
@@ -2651,11 +2652,27 @@ int shmem_collective_nic_initialization(void){
     OFI_CHECK_RETURN_STR(err, "fi_ep_bind RX_CQ to target endpoint failed");
 
 
-    err = fi_enable(shmem_transport_ofi_CXI_target_ep);
+    struct fi_eq_attr eq_attr = {
+        .size = 128,
+        .flags = FI_WRITE,
+        .wait_obj = FI_WAIT_NONE
+    };
+
+    err = fi_eq_open(shmem_transport_ofi_CXI_fabfd, &eq_attr, &(ctx->eq), NULL);
+    OFI_CHECK_RETURN_STR(err, "EQ creation failed\n");
+
+    err = fi_domain_bind(shmem_transport_ofi_CXI_domain_fd, &(ctx->eq->fid), 0);
+    OFI_CHECK_RETURN_STR(err, "Domain binding failed\n");
+
+    err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &(ctx->eq->fid), 0);
+
+   ctx->CXI_ep = shmem_transport_ofi_CXI_target_ep;
+
+
+    err = fi_enable(ctx->CXI_ep);
     OFI_CHECK_RETURN_STR(err, "fi_enable on target endpoint failed");
 
-    ctx->CXI_ep = shmem_transport_ofi_CXI_target_ep;
-    
+     
 
     PRINT_DEBUG("shmem_transport_ofi_CXI_avfd: %p\n", shmem_transport_ofi_CXI_avfd);
 
@@ -2674,17 +2691,6 @@ int shmem_collective_nic_initialization(void){
     err = fi_av_lookup(shmem_transport_ofi_CXI_avfd, myaddr, &shmem_transport_ofi_CXI_my_addr, &caddrlen);
     OFI_CHECK_RETURN_STR(err, "fi_av_lookup test failed\n");
 
-    struct fi_eq_attr eq_attr = {
-        .size = 128,
-        .flags = FI_WRITE,
-        .wait_obj = FI_WAIT_NONE
-    };
-
-    err = fi_eq_open(shmem_transport_ofi_CXI_fabfd, &eq_attr, &(shmem_transport_ctx_default.eq), NULL);
-    OFI_CHECK_RETURN_STR(err, "EQ creation failed\n");
-
-    err = fi_domain_bind(shmem_transport_ofi_CXI_domain_fd, &(shmem_transport_ctx_default.eq->fid), 0);
-    OFI_CHECK_RETURN_STR(err, "Domain binding failed\n");
 
     return err;
 

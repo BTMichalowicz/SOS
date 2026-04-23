@@ -557,9 +557,8 @@ long * shmem_internal_team_choose_psync(shmem_internal_team_t *team, shmem_inter
             shmem_internal_quiet(SHMEM_CTX_DEFAULT);
 
             size_t psync = team->psync_idx * SHMEM_SYNC_SIZE;
-            PRINT_DEBUG("Choosing internal sync\n");
             shmem_internal_sync(team->start, team->stride, team->size,
-                                &shmem_internal_psync_barrier_pool[psync]);
+                    &shmem_internal_psync_barrier_pool[psync]);
 
             for (int i = 0; i < N_PSYNCS_PER_TEAM; i++) {
                 team->psync_avail[i] = 1;
