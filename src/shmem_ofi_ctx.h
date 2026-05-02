@@ -79,6 +79,7 @@ struct shmem_transport_ctx_t {
     struct fid_cntr*                put_cntr;
     struct fid_cntr*                get_cntr;
     struct fid_cq*                  tx_cq;
+    struct fid_cq*                  coll_tx_cq;
     struct fid_cq*                  rx_cq;
 #ifdef USE_CTX_LOCK
     /* Pending cntr accesses are protected by ctx lock */
