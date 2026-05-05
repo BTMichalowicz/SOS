@@ -72,7 +72,6 @@ fi_addr_t                       shmem_transport_ofi_coll_addr;
 
 struct fid_ep*                  shmem_transport_ofi_target_ep;
 struct fid_cq*                  shmem_transport_ofi_target_cq;
-struct fid_cq*                  shmem_transport_ofi_recv_cq;
 
 
 static struct fabric_info              shmem_transport_ofi_CXI_info = {0};
@@ -86,6 +85,7 @@ fi_addr_t                       shmem_transport_ofi_CXI_my_addr;
 fi_addr_t                       *shmem_transport_ofi_CXI_addr_table;
 struct fid_ep                   *shmem_transport_ofi_CXI_target_ep;
 struct fid_cq                   *shmem_transport_ofi_CXI_target_cq;
+struct fid_eq                   *shmem_transport_ofi_CXI_eq;
 struct fid_cq                   *shmem_transport_ofi_CXI_recv_cq;
 struct fid_mc                   *ofi_coll_mc = NULL;
 struct fi_cxi_dom_ops           *cxi_dom_ops = NULL;
@@ -1043,6 +1043,18 @@ int bind_enable_ep_resources(shmem_transport_ctx_t *ctx)
         ret = fi_ep_bind(ctx->ep, &shmem_transport_ofi_avfd->fid, 0);
         OFI_CHECK_RETURN_STR(ret, "fi_ep_bind AV to endpoint failed");
 
+
+        ret = fi_ep_bind(ctx->CXI_ep, &ctx->coll_tx_cq->fid,
+                         FI_TRANSMIT );
+        OFI_CHECK_RETURN_STR(ret, "fi_ep_bind TX_CQ to endpoint failed");
+
+        ret = fi_ep_bind(ctx->CXI_ep, &ctx->rx_cq->fid,
+                         FI_RECV );
+        OFI_CHECK_RETURN_STR(ret, "fi_ep_bind RX_CQ to endpoint failed");
+
+        ret = fi_ep_bind(ctx->CXI_ep, &shmem_transport_ofi_CXI_avfd->fid, 0);
+        OFI_CHECK_RETURN_STR(ret, "fi_ep_bind AV to endpoint failed");
+
         ret = fi_enable(ctx->ep);
         OFI_CHECK_RETURN_STR(ret, "fi_enable on endpoint failed");
     } /* In single-endpoint mode, the sockets provider requires re-enabling the EP, but other
@@ -1702,7 +1714,6 @@ int populate_av(void)
         if (err != 0) {
             RAISE_ERROR_STR("Runtime get of 'fi_epname' failed");
         }
-    //    PRINT_DEBUG("Addr_ptr %s at addr %p\n", addr_ptr, addr_ptr);
     }
 
     ret = fi_av_insert(shmem_transport_ofi_avfd,
@@ -2200,7 +2211,7 @@ int query_for_fabric_collectives(struct fabric_info *info)
 
     fabric_attr.prov_name = strdup("cxi");
 
-    hints.caps   = FI_MSG; //| FI_RMA |     /* request rma capability
+    hints.caps   = FI_MSG | FI_COLLECTIVE; //| FI_RMA |     /* request rma capability
                             //       implies FI_READ/WRITE FI_REMOTE_READ/WRITE */
                  //  FI_ATOMIC;  /* request atomics capability */
    // hints.caps  |= FI_COLLECTIVE; /* Requesting collective support for MR's and EP's */
@@ -2450,91 +2461,97 @@ int allocate_fabric_resources(struct fabric_info *info)
     int ret = 0;
     struct fi_av_attr   av_attr = {0}; 
 
+    if (info == &shmem_transport_ofi_info){
+        /* fabric domain: define domain of resources physical and logical */
+        ret = fi_fabric(info->p_info->fabric_attr, &shmem_transport_ofi_fabfd, NULL);
+        OFI_CHECK_RETURN_STR(ret, "fabric initialization failed");
 
-    /* fabric domain: define domain of resources physical and logical */
-    ret = fi_fabric(info->p_info->fabric_attr, &shmem_transport_ofi_fabfd, NULL);
-    OFI_CHECK_RETURN_STR(ret, "fabric initialization failed");
+        DEBUG_MSG("OFI version: built %"PRIu32".%"PRIu32", cur. %"PRIu32".%"PRIu32"; "
+                "provider version: %"PRIu32".%"PRIu32"\n",
+                FI_MAJOR_VERSION, FI_MINOR_VERSION,
+                FI_MAJOR(fi_version()), FI_MINOR(fi_version()),
+                FI_MAJOR(info->p_info->fabric_attr->prov_version),
+                FI_MINOR(info->p_info->fabric_attr->prov_version));
 
-    DEBUG_MSG("OFI version: built %"PRIu32".%"PRIu32", cur. %"PRIu32".%"PRIu32"; "
-              "provider version: %"PRIu32".%"PRIu32"\n",
-              FI_MAJOR_VERSION, FI_MINOR_VERSION,
-              FI_MAJOR(fi_version()), FI_MINOR(fi_version()),
-              FI_MAJOR(info->p_info->fabric_attr->prov_version),
-              FI_MINOR(info->p_info->fabric_attr->prov_version));
+        if (FI_MAJOR_VERSION != FI_MAJOR(fi_version()) ||
+                FI_MINOR_VERSION != FI_MINOR(fi_version())) {
+            RAISE_WARN_MSG("OFI version mismatch: built %"PRIu32".%"PRIu32", cur. %"PRIu32".%"PRIu32"\n",
+                    FI_MAJOR_VERSION, FI_MINOR_VERSION,
+                    FI_MAJOR(fi_version()), FI_MINOR(fi_version()));
+        }
 
-    if (FI_MAJOR_VERSION != FI_MAJOR(fi_version()) ||
-        FI_MINOR_VERSION != FI_MINOR(fi_version())) {
-        RAISE_WARN_MSG("OFI version mismatch: built %"PRIu32".%"PRIu32", cur. %"PRIu32".%"PRIu32"\n",
-                       FI_MAJOR_VERSION, FI_MINOR_VERSION,
-                       FI_MAJOR(fi_version()), FI_MINOR(fi_version()));
-    }
+        /* access domain: define communication resource limits/boundary within
+         * fabric domain */
+        ret = fi_domain(shmem_transport_ofi_fabfd, info->p_info,
+                &shmem_transport_ofi_domainfd,NULL);
+        OFI_CHECK_RETURN_STR(ret, "domain initialization failed");
 
-    /* access domain: define communication resource limits/boundary within
-     * fabric domain */
-    ret = fi_domain(shmem_transport_ofi_fabfd, info->p_info,
-                    &shmem_transport_ofi_domainfd,NULL);
-    OFI_CHECK_RETURN_STR(ret, "domain initialization failed");
-
-    /* AV table set-up for PE mapping */
+        /* AV table set-up for PE mapping */
 
 #ifdef USE_AV_MAP
-    av_attr.type = FI_AV_MAP;
-    addr_table   = (fi_addr_t*) malloc(info->npes * sizeof(fi_addr_t));
+        av_attr.type = FI_AV_MAP;
+        addr_table   = (fi_addr_t*) malloc(info->npes * sizeof(fi_addr_t));
 #else
-    /* open Address Vector and bind the AV to the domain */
-    av_attr.type = FI_AV_TABLE;
-    addr_table   = NULL;
+        /* open Address Vector and bind the AV to the domain */
+        av_attr.type = FI_AV_TABLE;
+        addr_table   = NULL;
 #endif
 
-    av_attr.count=1024;
-    av_attr.rx_ctx_bits = 0;
+        av_attr.count=1024;
+        av_attr.rx_ctx_bits = 0;
 
-    ret = fi_av_open(shmem_transport_ofi_domainfd,
-                     &av_attr,
-                     &shmem_transport_ofi_avfd,
-                     NULL);
-    OFI_CHECK_RETURN_STR(ret, "AV creation failed");
- 
+        ret = fi_av_open(shmem_transport_ofi_domainfd,
+                &av_attr,
+                &shmem_transport_ofi_avfd,
+                NULL);
+        OFI_CHECK_RETURN_STR(ret, "AV creation failed");
+    }else{
+
+        ret = fi_fabric(info->p_info->fabric_attr, &shmem_transport_ofi_CXI_fabfd, NULL);
+        OFI_CHECK_RETURN_STR(ret, "coll_fabric initialization failed");
+
+        DEBUG_MSG("OFI version: built %"PRIu32".%"PRIu32", cur. %"PRIu32".%"PRIu32"; "
+                "provider version: %"PRIu32".%"PRIu32"\n",
+                FI_MAJOR_VERSION, FI_MINOR_VERSION,
+                FI_MAJOR(fi_version()), FI_MINOR(fi_version()),
+                FI_MAJOR(info->p_info->fabric_attr->prov_version),
+                FI_MINOR(info->p_info->fabric_attr->prov_version));
+
+        if (FI_MAJOR_VERSION != FI_MAJOR(fi_version()) ||
+                FI_MINOR_VERSION != FI_MINOR(fi_version())) {
+            RAISE_WARN_MSG("OFI version mismatch: built %"PRIu32".%"PRIu32", cur. %"PRIu32".%"PRIu32"\n",
+                    FI_MAJOR_VERSION, FI_MINOR_VERSION,
+                    FI_MAJOR(fi_version()), FI_MINOR(fi_version()));
+        }
+
+        ret = fi_domain(shmem_transport_ofi_fabfd, info->p_info,
+                &shmem_transport_ofi_CXI_domain_fd, NULL);
+        OFI_CHECK_RETURN_STR(ret, "domain initialization failed");
+
+        struct fi_av_attr av_attr = {};
+        av_attr.type = FI_AV_TABLE;
+        av_attr.rx_ctx_bits = 0;
+
+
+        ret = fi_av_open(shmem_transport_ofi_CXI_domain_fd, &av_attr,
+                &shmem_transport_ofi_CXI_avfd, NULL);
+        OFI_CHECK_RETURN_MSG(ret, "CXI av init failed %d %s\n", ret, fi_strerror(errno));
+
+    }
+
     return ret;
 }
-
-
 
 int shmem_collective_nic_initialization(void){
 
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
     int err = FI_SUCCESS, i = 0, local_size = 0;
-   // fi_addr_t *fi_addrs = NULL;
     internal_addr_t *alladdrs = NULL;
     char *alladdrs2 = NULL;
     local_size = ctx->nics_per_rank * NICSIZE;
     if (ctx->NIC_array){
         return FI_SUCCESS;
     }
-
-    struct fi_info *local_hints = fi_allocinfo();
-    if (local_hints == NULL){
-        PRINT_ERROR("hints cannot be allocated \n");
-        return -FI_ENOMEM;
-    }
-
-    local_hints->fabric_attr->prov_name = strdup("cxi");
-    local_hints->domain_attr->mr_mode = FI_MR_ENDPOINT | FI_COLLECTIVE;
-    local_hints->caps = FI_MSG | FI_COLLECTIVE;
-    local_hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
-
-    PRINT_DEBUG("Getting info for slingshot version\n");
-    err = fi_getinfo( FI_VERSION(OFI_MAJOR_VERSION, OFI_MINOR_VERSION),
-                      NULL, NULL, 0, local_hints, &(shmem_transport_ofi_CXI_info.fabrics));
-
-    OFI_CHECK_RETURN_STR(err, "Failed to get info\n");
-    
-
-
-  //  err = query_for_fabric_collectives(&shmem_transport_ofi_CXI_info);
-  //  OFI_CHECK_RETURN_STR(err, "CXI info query failed\n");
- //   err = allocate_fabric_resources(&shmem_transport_ofi_CXI_info);
- //   OFI_CHECK_RETURN_STR(err, "CXI info fabric allocation failed\n");
 
     ctx->NIC_array = malloc(shmem_internal_num_pes * local_size);
     if (ctx->NIC_array == NULL){
@@ -2576,12 +2593,12 @@ int shmem_collective_nic_initialization(void){
         get_local_nic(ctx, i, &local_nics[i]);
     }
 
-//    for (i = 0; i < ctx->num_nics; i++){
+    for (i = 0; i < ctx->num_nics; i++){
         PRINT_DEBUG("LOCAL rank=%2d hsn=%d nic=%05x\n",
                 local_nics[0].rank,
                 local_nics[0].hsn,
                 local_nics[0].nic);
-//    }
+    }
 
 
     PRINT_DEBUG("Local NICs retrieved\n");
@@ -2631,26 +2648,6 @@ int shmem_collective_nic_initialization(void){
                 ctx->NIC_array[i].nic);
     }
 
-    PRINT_DEBUG("OFI CXI init\n");
-
-    err = fi_fabric(shmem_transport_ofi_CXI_info.fabrics->fabric_attr,
-            &shmem_transport_ofi_CXI_fabfd, NULL);
-    OFI_CHECK_RETURN_STR(err, "CXI fab failed\n");
-    if (shmem_transport_ofi_CXI_fabfd == NULL){
-        PRINT_ERROR("fabric fd is null\n");
-        goto fail;
-    }
-
-    PRINT_DEBUG("fabric set up\n");
-    
-    err = fi_domain(shmem_transport_ofi_CXI_fabfd, shmem_transport_ofi_CXI_info.fabrics,
-            &shmem_transport_ofi_CXI_domain_fd, NULL);
-    OFI_CHECK_RETURN_STR(err, "CXI domain init failed\n");
-
-    if (shmem_transport_ofi_CXI_domain_fd == NULL){
-        PRINT_ERROR("domainfd is NULL\n");
-        goto fail;
-    }
     PRINT_DEBUG("Domain set up\n");
 
     err = fi_open_ops(&shmem_transport_ofi_CXI_domain_fd->fid, FI_CXI_DOM_OPS_1, 0,
@@ -2670,106 +2667,13 @@ int shmem_collective_nic_initialization(void){
 
 
 
-    struct fi_av_attr av_attr = {};
-    av_attr.type = FI_AV_TABLE;
-    av_attr.rx_ctx_bits = 0;
-
-
-    err = fi_av_open(shmem_transport_ofi_CXI_domain_fd, &av_attr,
-            &shmem_transport_ofi_CXI_avfd, NULL);
-    OFI_CHECK_RETURN_STR(err, "CXI domain init failed\n");
-
     if (shmem_transport_ofi_CXI_avfd == NULL){
         PRINT_ERROR("avfd is null!!\n");
         goto fail;
     }
 
-    err = fi_endpoint(shmem_transport_ofi_CXI_domain_fd, shmem_transport_ofi_CXI_info.fabrics,
-            &shmem_transport_ofi_CXI_target_ep, NULL);
-    
-    OFI_CHECK_RETURN_STR(err, "CXI ep failed\n");
-    
-    err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &shmem_transport_ofi_CXI_avfd->fid, 0);
-    OFI_CHECK_RETURN_STR(err, "CXI_fi_ep_bind AV to target endpoint failed");
-
-    struct fi_cq_attr cq_attr = {0};
-
-    err = fi_cq_open(shmem_transport_ofi_CXI_domain_fd, &cq_attr,
-                     &shmem_transport_ofi_CXI_target_cq, NULL);
-    OFI_CHECK_RETURN_MSG(err, "cq_open failed (%s)\n", fi_strerror(errno));
-
-    err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep,
-                     &shmem_transport_ofi_CXI_target_cq->fid, FI_TRANSMIT );
-    OFI_CHECK_RETURN_STR(err, "fi_ep_bind tx_CQ to target endpoint failed");
-
-     struct fi_cq_attr recv_cq_attr = {
-        .format = FI_CQ_FORMAT_TAGGED
-    };
-
-    err = fi_cq_open(shmem_transport_ofi_CXI_domain_fd, &recv_cq_attr,
-            &shmem_transport_ofi_CXI_recv_cq, NULL);
-    OFI_CHECK_RETURN_MSG(err, "recv_cq_open failed (%s)\n", fi_strerror(errno));
-
-    PRINT_DEBUG("Binding recv_cq %p to ep %p\n", shmem_transport_ofi_CXI_recv_cq,
-            shmem_transport_ofi_CXI_target_ep);
-    
-    err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep,
-            &shmem_transport_ofi_CXI_recv_cq->fid,  FI_RECV);
-    OFI_CHECK_RETURN_STR(err, "fi_ep_bind RX_CQ to target endpoint failed");
-
     ctx->rx_cq = &shmem_transport_ofi_CXI_recv_cq;
-    ctx->coll_tx_cq = &shmem_transport_ofi_CXI_target_cq;
-
-
-    struct fi_eq_attr eq_attr = {
-        .size = 512,
-        .flags = FI_WRITE,
-        .wait_obj = FI_WAIT_NONE
-    };
-
-
-    err = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_send_cntr, NULL);
-    OFI_CHECK_RETURN_STR(err, "coll_send_cntr opening failed\n");
-    err = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_recv_cntr, NULL);
-    OFI_CHECK_RETURN_STR(err, "coll_recv_cntr opening failed\n");
-    err = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_write_cntr, NULL);
-    OFI_CHECK_RETURN_STR(err, "coll_write_cntr opening failed\n");
-    err = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_read_cntr, NULL);
-    OFI_CHECK_RETURN_STR(err, "coll_read_cntr opening failed\n");
-
-    err = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_rem_cntr, NULL);
-    OFI_CHECK_RETURN_STR(err, "coll_rem_cntr opening failed\n");
-
-
-
-    err = fi_bind(shmem_transport_ofi_CXI_target_ep, &coll_send_cntr->fid, FI_SEND);
-    OFI_CHECK_RETURN_STR(err, "coll_send_cntr binding failed\n");
-    err = fi_bind(shmem_transport_ofi_CXI_target_ep, &coll_recv_cntr->fid, FI_RECV);
-    OFI_CHECK_RETURN_STR(err, "coll_recv_cntr binding failed\n");
-    err = fi_bind(shmem_transport_ofi_CXI_target_ep, &coll_write_cntr->fid, FI_WRITE);
-    OFI_CHECK_RETURN_STR(err, "coll_write_cntr binding failed\n");
-    err = fi_bind(shmem_transport_ofi_CXI_target_ep, &coll_read_cntr->fid, FI_READ);
-    OFI_CHECK_RETURN_STR(err, "coll_read_cntr binding failed\n");
-
-
-    PRINT_DEBUG("Finished opening and binding counters\n");
-
-
-    err = fi_eq_open(shmem_transport_ofi_CXI_fabfd, &eq_attr, &(ctx->eq), NULL);
-    OFI_CHECK_RETURN_STR(err, "EQ creation failed\n");
-
-    err = fi_domain_bind(shmem_transport_ofi_CXI_domain_fd, &(ctx->eq->fid), 0);
-    OFI_CHECK_RETURN_STR(err, "Domain binding failed\n");
-
-    err = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &(ctx->eq->fid), 0);
-
-   ctx->CXI_ep = shmem_transport_ofi_CXI_target_ep;
-
-
-    PRINT_DEBUG("Enabling the Slingshot EP!\n");
-    err = fi_enable(ctx->CXI_ep);
-    OFI_CHECK_RETURN_STR(err, "fi_enable on target endpoint failed");
-
+    ctx->coll_tx_cq = &shmem_transport_ofi_CXI_target_cq; 
      
 
     PRINT_DEBUG("shmem_transport_ofi_CXI_avfd: %p\n", shmem_transport_ofi_CXI_avfd);
@@ -2791,8 +2695,6 @@ int shmem_collective_nic_initialization(void){
     OFI_CHECK_RETURN_STR(err, "fi_av_lookup test failed\n");
 
     PRINT_DEBUG("my_addr 0x%lx caddr %05x\n", myaddr, internal_addr.nic);
-
-
 
     return err;
 
@@ -2819,12 +2721,12 @@ int query_for_fabric(struct fabric_info *info)
 
     fabric_attr.prov_name = info->prov_name;
 
-    hints.caps   = FI_MSG ; //| FI_COLLECTIVE; //| FI_RMA |     /* request rma capability
+    hints.caps   = FI_MSG| FI_RMA | FI_ATOMIC ; //| FI_COLLECTIVE; //| FI_RMA |     /* request rma capability
                            //        implies FI_READ/WRITE FI_REMOTE_READ/WRITE */
                 //   FI_ATOMIC;  /* request atomics capability */
 //    hints.caps  |= FI_COLLECTIVE; /* Requesting collective support for MR's and EP's */
 #if ENABLE_TARGET_CNTR
-  //  hints.caps |= FI_RMA_EVENT; /* want to use remote counters */
+    hints.caps |= FI_RMA_EVENT; /* want to use remote counters */
 #endif /* ENABLE_TARGET_CNTR */
 #ifdef USE_FI_FENCE
     hints.caps |= FI_FENCE;     /* request fence capability; FI_FENCE adds
@@ -2849,7 +2751,7 @@ int query_for_fabric(struct fabric_info *info)
 #  endif
 #else
                                 /* Portable, absolute addressing, formerly FI_MR_BASIC */
-    domain_attr.mr_mode       = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED | FI_MR_PROV_KEY | FI_COLLECTIVE;
+    domain_attr.mr_mode       = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED | FI_MR_PROV_KEY ;
 #endif
 #ifdef ENABLE_MR_ENDPOINT
     domain_attr.mr_mode |= FI_MR_ENDPOINT;
@@ -3072,6 +2974,92 @@ static int shmem_transport_ofi_target_ep_init(void)
     ret = allocate_recv_cntr_mr();
     if (ret) return ret;
 
+
+    /* Addition: Collective EP attributes */
+
+    info = &shmem_transport_ofi_CXI_info;
+    info->p_info->ep_attr->tx_ctx_cnt = 0;
+    info->p_info->caps = FI_MSG | FI_RECV | FI_COLLECTIVE;
+
+    ret = fi_endpoint(shmem_transport_ofi_domainfd,
+                      info->p_info, &shmem_transport_ofi_CXI_target_ep, NULL);
+    OFI_CHECK_RETURN_MSG(ret, "target endpoint creation failed (%s)\n", fi_strerror(errno));
+
+
+    ret = fi_cq_open(shmem_transport_ofi_CXI_domain_fd, &cq_attr,
+            &shmem_transport_ofi_CXI_target_cq, NULL);
+    OFI_CHECK_RETURN_MSG(ret, "collective target_cq failed: %d %s\n", ret, fi_strerror(errno));
+
+    struct fi_cq_attr rx_cq_attr = {
+        .format = FI_CQ_FORMAT_TAGGED
+    };
+
+    ret = fi_cq_open(shmem_transport_ofi_CXI_domain_fd, &rx_cq_attr,
+            &shmem_transport_ofi_CXI_recv_cq, NULL);
+    OFI_CHECK_RETURN_MSG(ret, "collective recv_cq failed: %d %s\n", ret, fi_strerror(errno));
+
+
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep,
+            &shmem_transport_ofi_CXI_target_cq->fid, 
+            FI_TRANSMIT);
+    OFI_CHECK_RETURN_STR(ret, "fi_ep_bind CXI_TX_CQ to target endpoint failed");
+
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep,
+            &shmem_transport_ofi_CXI_recv_cq->fid, 
+            FI_RECV);
+    OFI_CHECK_RETURN_STR(ret, "fi_ep_bind CXI_TX_CQ to target endpoint failed");
+    
+    
+    struct fi_eq_attr eq_attr = {
+        .size = 512,
+        .flags = FI_WRITE,
+        .wait_obj = FI_WAIT_NONE
+    };
+
+
+    ret = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_send_cntr, NULL);
+    OFI_CHECK_RETURN_STR(ret, "coll_send_cntr opening failed\n");
+    ret = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_recv_cntr, NULL);
+    OFI_CHECK_RETURN_STR(ret, "coll_recv_cntr opening failed\n");
+    ret = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_write_cntr, NULL);
+    OFI_CHECK_RETURN_STR(ret, "coll_write_cntr opening failed\n");
+    ret = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_read_cntr, NULL);
+    OFI_CHECK_RETURN_STR(ret, "coll_read_cntr opening failed\n");
+
+    ret = fi_cntr_open(shmem_transport_ofi_CXI_domain_fd, NULL, &coll_rem_cntr, NULL);
+    OFI_CHECK_RETURN_STR(ret, "coll_rem_cntr opening failed\n");
+
+
+
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &coll_send_cntr->fid, FI_SEND);
+    OFI_CHECK_RETURN_STR(ret, "coll_send_cntr binding failed\n");
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &coll_recv_cntr->fid, FI_RECV);
+    OFI_CHECK_RETURN_STR(ret, "coll_recv_cntr binding failed\n");
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &coll_write_cntr->fid, FI_WRITE);
+    OFI_CHECK_RETURN_STR(ret, "coll_write_cntr binding failed\n");
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &coll_read_cntr->fid, FI_READ);
+    OFI_CHECK_RETURN_STR(ret, "coll_read_cntr binding failed\n");
+
+
+    PRINT_DEBUG("Finished opening and binding counters\n");
+
+
+    
+    ret = fi_eq_open(shmem_transport_ofi_CXI_fabfd, &eq_attr, &(shmem_transport_ofi_CXI_eq), NULL);
+    OFI_CHECK_RETURN_STR(ret, "EQ creation failed\n");
+
+    ret = fi_domain_bind(shmem_transport_ofi_CXI_domain_fd, &(shmem_transport_ofi_CXI_eq->fid), 0);
+    OFI_CHECK_RETURN_STR(ret, "Domain binding failed\n");
+
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &(shmem_transport_ofi_CXI_eq->fid), 0);
+
+
+    ret = fi_ep_bind(shmem_transport_ofi_CXI_target_ep, &shmem_transport_ofi_CXI_avfd->fid, 0);
+    OFI_CHECK_RETURN_STR(ret, "fi_ep_bind AV to target endpoint failed");
+
+    ret = fi_enable(shmem_transport_ofi_CXI_target_ep);
+    OFI_CHECK_RETURN_STR(ret, "fi_enable on coll_target endpoint failed");
+
     return 0;
 }
 
@@ -3105,13 +3093,28 @@ static int shmem_transport_ofi_ctx_init(shmem_transport_ctx_t *ctx, int id)
     struct fabric_info* info = &shmem_transport_ofi_info;
 
     info->p_info->ep_attr->tx_ctx_cnt = shmem_transport_ofi_stx_max > 0 ? FI_SHARED_CONTEXT : 0;
-    info->p_info->caps = FI_RMA | FI_WRITE | FI_READ | FI_ATOMIC | FI_RECV | FI_COLLECTIVE;
+    info->p_info->caps = FI_RMA | FI_WRITE | FI_READ | FI_ATOMIC | FI_RECV | FI_COLLECTIVE | FI_MSG;
     info->p_info->tx_attr->op_flags = FI_DELIVERY_COMPLETE;
     info->p_info->mode = 0;
     info->p_info->tx_attr->mode = 0;
     info->p_info->rx_attr->mode = 0;
     info->p_info->tx_attr->caps = info->p_info->caps;
     info->p_info->rx_attr->caps = FI_RECV; /* to drive progress on the CQ */;
+
+
+
+    info = &shmem_transport_ofi_CXI_info;
+
+    info->p_info->ep_attr->tx_ctx_cnt = shmem_transport_ofi_stx_max > 0 ? FI_SHARED_CONTEXT : 0;
+    info->p_info->caps = FI_RECV | FI_MSG |  FI_COLLECTIVE;
+    info->p_info->tx_attr->op_flags = FI_DELIVERY_COMPLETE;
+    info->p_info->mode = 0;
+    info->p_info->tx_attr->mode = 0;
+    info->p_info->rx_attr->mode = 0;
+    info->p_info->tx_attr->caps = info->p_info->caps;
+    info->p_info->rx_attr->caps = FI_RECV; /* to drive progress on the CQ */;
+
+    info = &shmem_transport_ofi_info;
 
     ctx->id = id;
 #ifdef USE_CTX_LOCK
@@ -3128,9 +3131,10 @@ static int shmem_transport_ofi_ctx_init(shmem_transport_ctx_t *ctx, int id)
 
     if (shmem_transport_ofi_single_ep && id == SHMEM_TRANSPORT_CTX_DEFAULT_ID) {
         ctx->tx_cq = shmem_transport_ofi_target_cq;
-        ctx->rx_cq = shmem_transport_ofi_recv_cq;
+        ctx->rx_cq = shmem_transport_ofi_CXI_recv_cq;
         ctx->ep = shmem_transport_ofi_target_ep;
         ctx->CXI_ep = shmem_transport_ofi_CXI_target_ep;
+        ctx->coll_tx_cq = shmem_transport_ofi_CXI_target_cq;
     } else {
         ret = fi_cq_open(shmem_transport_ofi_domainfd, &cq_attr, &ctx->tx_cq, NULL);
         if (ret && errno == FI_EMFILE) {
@@ -3141,6 +3145,28 @@ static int shmem_transport_ofi_ctx_init(shmem_transport_ctx_t *ctx, int id)
         ret = fi_endpoint(shmem_transport_ofi_domainfd,
                           info->p_info, &ctx->ep, NULL);
         OFI_CHECK_RETURN_MSG(ret, "ep creation failed (%s)\n", fi_strerror(errno));
+
+        info = &shmem_transport_ofi_CXI_info;
+
+        ret = fi_cq_open(shmem_transport_ofi_CXI_domain_fd, &cq_attr, &ctx->coll_tx_cq, NULL);
+        if (ret && errno == FI_EMFILE) {
+            DEBUG_STR("Context creation failed because of open files limit, consider increasing with 'ulimit' command");
+        }
+        OFI_CHECK_RETURN_MSG(ret, "coll_tx_cq_open failed (%s)\n", fi_strerror(errno));
+
+
+        ret = fi_cq_open(shmem_transport_ofi_CXI_domain_fd, &cq_attr, &ctx->rx_cq, NULL);
+        if (ret && errno == FI_EMFILE) {
+            DEBUG_STR("Context creation failed because of open files limit, consider increasing with 'ulimit' command");
+        }
+        OFI_CHECK_RETURN_MSG(ret, "coll_rx_cq_open failed (%s)\n", fi_strerror(errno));
+
+ 
+        ret = fi_endpoint(shmem_transport_ofi_domainfd,
+                info->p_info, &ctx->CXI_ep, NULL);
+        OFI_CHECK_RETURN_MSG(ret, "ep creation failed (%s)\n", fi_strerror(errno));
+
+        info = &shmem_transport_ofi_info;
     }
 
     /* TODO: Fill in TX attr */
@@ -3217,27 +3243,28 @@ int shmem_transport_init(void)
     shmem_transport_ofi_info.npes = shmem_runtime_get_size();
     shmem_transport_ofi_CXI_info.npes = shmem_transport_ofi_info.npes;
 
+    shmem_transport_ofi_info.prov_name = NULL;
+    shmem_transport_ofi_info.fabric_name = NULL;
+    shmem_transport_ofi_info.domain_name = NULL;
+
+    shmem_transport_ofi_CXI_info.prov_name = NULL;
+    shmem_transport_ofi_CXI_info.fabric_name = NULL;
+    shmem_transport_ofi_CXI_info.domain_name = NULL;
 
     if (shmem_internal_params.OFI_PROVIDER_provided){
         shmem_transport_ofi_info.prov_name = shmem_internal_params.OFI_PROVIDER;
         shmem_transport_ofi_CXI_info.prov_name = shmem_internal_params.OFI_PROVIDER;
     }
-    else
-        shmem_transport_ofi_info.prov_name = NULL;
 
     if (shmem_internal_params.OFI_FABRIC_provided){
         shmem_transport_ofi_info.fabric_name = shmem_internal_params.OFI_FABRIC;
         shmem_transport_ofi_CXI_info.fabric_name = shmem_internal_params.OFI_FABRIC;
     }
-    else
-        shmem_transport_ofi_info.fabric_name = NULL;
 
     if (shmem_internal_params.OFI_DOMAIN_provided){
         shmem_transport_ofi_info.domain_name = shmem_internal_params.OFI_DOMAIN;
         shmem_transport_ofi_CXI_info.domain_name = shmem_internal_params.OFI_DOMAIN;
     }
-    else
-        shmem_transport_ofi_info.domain_name = NULL;
 
     /* Unless SHMEM_OFI_DISABLE_SINGLE_EP env var is set, each PE opens a single libfabric endpoint
      * for both transmission (on the default context) and as the target of communication */
@@ -3265,11 +3292,21 @@ int shmem_transport_init(void)
     }
     shmem_transport_ofi_stx_threshold = shmem_internal_params.OFI_STX_THRESHOLD;
 
+    PRINT_DEBUG("Querying fot fabric and attributes used for pt2pt\n");
     ret = query_for_fabric(&shmem_transport_ofi_info);
+    if (ret != 0) return ret;
+
+    PRINT_DEBUG("Querying for collectives\n");
+    ret = query_for_fabric_collectives(&shmem_transport_ofi_CXI_info);
     if (ret != 0) return ret;
 
     ret = allocate_fabric_resources(&shmem_transport_ofi_info);
     if (ret != 0) return ret;
+
+    PRINT_DEBUG("Allocating resources for collectives now\n");
+    ret = allocate_fabric_resources(&shmem_transport_ofi_CXI_info);
+    if (ret != 0) return ret;
+
 
     /* STX sharing settings */
     char *type = shmem_internal_params.OFI_STX_ALLOCATOR;
