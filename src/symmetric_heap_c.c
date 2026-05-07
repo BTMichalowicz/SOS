@@ -294,7 +294,7 @@ shmem_malloc(size_t size)
     SHMEM_MUTEX_LOCK(shmem_internal_mutex_alloc);
     ret = dlmalloc(size);
     SHMEM_MUTEX_UNLOCK(shmem_internal_mutex_alloc);
-
+    PRINT_DEBUG("shmem_malloc barrier thing\n");
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
     shmem_internal_sync_sw(0, 1, shmem_internal_num_pes,
             shmem_internal_barrier_all_psync);

@@ -271,19 +271,22 @@ shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync
 
     /* need 1 slot */
     shmem_internal_assert(SHMEM_BARRIER_SYNC_SIZE >= 1);
-
+    PRINT_DEBUG("Linear sync\n");
     if (PE_start == shmem_internal_my_pe) {
         int pe, i;
 
         /* wait for N - 1 callins up the tree */
+        PRINT_DEBUG("Entering a wait-until\n");
         SHMEM_WAIT_UNTIL(pSync, SHMEM_CMP_EQ, PE_size - 1);
 
         /* Clear pSync */
+        PRINT_DEBUG("Putting in scalar to clear the PSync\n");
         shmem_internal_put_scalar(SHMEM_CTX_DEFAULT, pSync, &zero, sizeof(zero),
                                  shmem_internal_my_pe);
         SHMEM_WAIT_UNTIL(pSync, SHMEM_CMP_EQ, 0);
 
         /* Send acks down psync tree */
+        PRINT_DEBUG("Starting to send acks down the tree\n");
         for (pe = PE_start + PE_stride, i = 1 ;
              i < PE_size ;
              i++, pe += PE_stride) {
@@ -292,6 +295,7 @@ shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync
 
     } else {
         /* send message to root */
+        PRINT_DEBUG("Sending messages back to the root\n");
         shmem_internal_atomic(SHMEM_CTX_DEFAULT, pSync, &one, sizeof(one), PE_start,
                               SHM_INTERNAL_SUM, SHM_INTERNAL_LONG);
 
@@ -301,7 +305,10 @@ shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync
         /* Clear pSync */
         shmem_internal_put_scalar(SHMEM_CTX_DEFAULT, pSync, &zero, sizeof(zero),
                                  shmem_internal_my_pe);
+
+        PRINT_DEBUG("ALSO doing a wait-until\n");
         SHMEM_WAIT_UNTIL(pSync, SHMEM_CMP_EQ, 0);
+        PRINT_DEBUG("Done with non-root things\n");
     }
 
 }

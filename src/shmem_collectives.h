@@ -55,6 +55,8 @@ static inline void shmem_internal_sync_sw(int PE_start, int PE_stride, int PE_si
         fflush(stderr);
     }
 
+    PRINT_DEBUG("internal_sync_sw: Barrier type %d\n", shmem_internal_barrier_type);
+
     if (PE_size == 1) return;
 
     switch (shmem_internal_barrier_type) {
@@ -408,6 +410,7 @@ void
 shmem_internal_fcollect(void *target, const void *source, size_t len,
                    int PE_start, int PE_stride, int PE_size, long *pSync)
 {
+    PRINT_DEBUG("Collect type %d\n", shmem_internal_fcollect_type);
     switch (shmem_internal_fcollect_type) {
     case AUTO:
         shmem_internal_fcollect_ring(target, source, len, PE_start, PE_stride,

@@ -28,8 +28,8 @@
 /* Some things taken directly from cxip.h to replicate what exactly is going
  * on/what should be going on */
 
-#define MAX_BITS 20
-#define NIC_BITS 9
+#define MAX_BITS 9
+#define NIC_BITS 20
 #define PAD 3
 
 
