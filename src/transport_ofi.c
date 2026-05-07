@@ -2664,6 +2664,10 @@ int socket_connect(shmem_transport_ctx_t *ctx, int portno, size_t size, void *da
     int error, ret;
 
     error = -1;
+
+	connfd = socket(AF_INET, SOCK_STREAM, 0);
+	FAIL(connfd < 0, "socket", labclose);
+
     ret = setsockopt(connfd, SOL_SOCKET, SO_REUSEADDR,
             &(int){1}, sizeof(int));
     if (ret < 0 ){
@@ -2672,8 +2676,8 @@ int socket_connect(shmem_transport_ctx_t *ctx, int portno, size_t size, void *da
     }
 
     he = gethostbyname(ctx->node_0);
-    if (he != 0){
-        PRINT_ERROR("gethostbyname\n");
+    if (he == NULL){
+        PRINT_ERROR("gethostbyname: %s\n", ctx->node_0);
         goto labclose;
     }
     //FAIL(!he, "gethostbyname", labclose);
