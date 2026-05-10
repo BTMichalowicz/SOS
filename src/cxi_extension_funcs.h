@@ -34,10 +34,10 @@ static inline int d_empty(struct d_entry *head)
 static inline void
 d_insert_after(struct d_entry *item, struct d_entry *head)
 {
-        item->next = head->next;
-            item->prev = head;
-                head->next->prev = item;
-                    head->next = item;
+    item->next = head->next;
+    item->prev = head;
+    head->next->prev = item;
+    head->next = item;
 }
 
 static inline void
@@ -177,18 +177,6 @@ static void avset_ary_init(struct avset_ary *setary)
     setary->avset = NULL;
     setary->avset_cnt = 0;
     setary->avset_siz = 0;
-}
-
-static void avset_ary_destroy(struct avset_ary *setary)
-{
-    int i;
-
-    if (setary->avset) {
-        for (i = 0; i < setary->avset_cnt; i++)
-            fi_close(&setary->avset[i]->fid);
-        free(setary->avset);
-    }
-    avset_ary_init(setary);
 }
 
 

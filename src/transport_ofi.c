@@ -206,6 +206,18 @@ int shmem_transport_ofi_single_ep;
 #define SHM_INTERNAL_UINT64 FI_UINT64
 
 
+static void avset_ary_destroy(struct avset_ary *setary)
+{
+    int i;
+
+    if (setary->avset) {
+        for (i = 0; i < setary->avset_cnt; i++)
+            fi_close(&setary->avset[i]->fid);
+        free(setary->avset);
+    }
+    avset_ary_init(setary);
+}
+
 static int avset_ary_append(fi_addr_t *fiaddrs, size_t size,
         int mcast_addr, int root_idx,
         struct avset_ary *setary, int start, int stride)
@@ -306,6 +318,7 @@ static int eq_poll(shmem_transport_ctx_t *ctx){
             return -FI_EINVAL;
         }
         jctx = eqd.context;
+        PRINT_DEBUG("Simple response: jctx/context = %p\n", jctx);
         jctx->retval = 0;
         jctx->prov_errno = 0;
         return FI_SUCCESS;
@@ -324,6 +337,7 @@ static int eq_poll(shmem_transport_ctx_t *ctx){
         } 
 
         jctx = eqd.context;
+        PRINT_DEBUG("Round 2 response: jctx/context = %p\n", jctx);
         jctx->retval = eqd.err;
         jctx->prov_errno = eqd.prov_errno;
         return FI_SUCCESS;
@@ -340,14 +354,20 @@ static void *cq_poll(shmem_transport_ctx_t *ctx){
     size = fi_cq_read(ctx->rx_cq, &cq_err, 1);
     if (size == -FI_EAVAIL)
         size = fi_cq_readerr(ctx->rx_cq, &cq_err, 1);
-    if (size > 0)
+    if (size > 0){
+        PRINT_DEBUG("rx_cq Success, returning context %p\n", cq_err.op_context);
         return cq_err.op_context;
+    }
 
     size = fi_cq_read(ctx->coll_tx_cq, &cq_err, 1);
     if (size == -FI_EAVAIL)
         size = fi_cq_readerr(ctx->coll_tx_cq, &cq_err, 1);
-    if (size > 0)
+    if (size > 0){
+        PRINT_DEBUG("coll_tx_cq Success, returning context %p\n", cq_err.op_context);
         return cq_err.op_context; 
+    }
+
+//    PRINT_DEBUG("Returning NULL\n");
     return NULL;
 }
 
@@ -387,7 +407,9 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
                 ep, 
                 setary->avset[i], &(jctx->mc), jctx, FI_ADDR_NOTAVAIL);
         ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
-                setary->avset[i], 0L, &(jctx->mc), jctx);
+                setary->avset[i], 0L, &jctx->mc, jctx);
+
+        PRINT_DEBUG("mc after join: 0x%lx\n", jctx->mc);
 
         if (ret == -FI_ECONNREFUSED) {
             free(jctx);
@@ -411,7 +433,7 @@ static int coll_multi_join(shmem_transport_ctx_t *ctx, struct avset_ary *setary,
         count++;
     }
 
-    PRINT_ERROR("DONE %s completed %d joins\n", __func__, count);
+    PRINT_DEBUG("DONE %s completed %d joins\n", __func__, count);
     return FI_SUCCESS;
 
 fail:
@@ -495,6 +517,7 @@ static uint64_t _simple_get_mc(struct d_entry *joinlist)
         PRINT_ERROR("Join item is NULL\n");
         return 0;
     }
+    PRINT_DEBUG("jctx->mc: 0x%lx\n", (uint64_t)jctx->mc);
     return (uint64_t)jctx->mc;
 }
 
@@ -2108,11 +2131,15 @@ void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *p
     OFI_CHECK_ERROR_MSG(ret, "Failed to perform a join %d: %s\n", ret, fi_strerror(ret));
 
     mc = _simple_get_mc(&joinlist);
-    OFI_CHECK_ERROR_MSG(!mc, "Failed to get the MC for barrier\n");
+
+    PRINT_DEBUG("mc: 0x%lx\n", mc);
+    OFI_CHECK_ERROR_MSG(mc == 0, "Failed to get the MC for barrier\n");
 
     ret = fi_barrier(ep, mc, &context);
     OFI_CHECK_ERROR_MSG(ret, "Failed to barrier: %d %s\n", ret, fi_strerror(ret));
     cq_wait(ctx, &context);
+
+    avset_ary_destroy(&setary);
 
 
 #else
@@ -2446,9 +2473,6 @@ static void get_local_nic(shmem_transport_ctx_t *ctx, int hsn, nic_addr_t *nic){
     }
 
     nic->hsn = hsn;
-    int pe = atoi(getenv("PMI_RANK"));
-
-    PRINT_DEBUG("pe: %d my_pe: %d\n", pe, shmem_internal_my_pe);
     nic->rank = shmem_internal_my_pe;
     PRINT_DEBUG("NIC hsn=%d rank=%3d nic=%05x\n", nic->hsn, shmem_internal_my_pe, nic->nic);
 
@@ -2724,11 +2748,10 @@ labclose:
 static int socket_allgather (shmem_transport_ctx_t *ctx, size_t size, void *data, void *res){
 
     int portno = 5000;
-    if (strcmp(ctx->node_0, ctx->nodename) == 0){
-        return socket_accept(ctx, portno, size, data, res);
-    }else{
-        return socket_connect(ctx, portno, size, data, res);
-    }
+
+
+    return (!strcmp(ctx->node_0, ctx->nodename)) ? socket_accept(ctx, portno, size, data, res)
+        : socket_connect(ctx, portno, size, data, res); ;
 }
 
 
@@ -2747,6 +2770,7 @@ int shmem_collective_nic_initialization(void){
     }
 
     ctx->num_nics = shmem_internal_num_pes * ctx->nics_per_rank;
+    ctx->eq = shmem_transport_ofi_CXI_eq;
 
 
     ctx->NIC_array = malloc(shmem_internal_num_pes * local_size);
@@ -2800,10 +2824,10 @@ int shmem_collective_nic_initialization(void){
     PRINT_DEBUG("Local NICs retrieved\n");
 
 
-    err = socket_allgather(ctx, local_size, local_nics, ctx->NIC_array);
-    OFI_CHECK_RETURN_MSG(err, "failed to perform a socket-based allgather on the NICS %d %s\n", err, fi_strerror(err));
+ //   err = socket_allgather(ctx, local_size, local_nics, ctx->NIC_array);
+ //   OFI_CHECK_RETURN_MSG(err, "failed to perform a socket-based allgather on the NICS %d %s\n", err, fi_strerror(err));
 
- /*   nic_addr_t *shmem_nics = shmem_malloc(shmem_internal_num_pes* local_size);
+    nic_addr_t *shmem_nics = shmem_malloc(shmem_internal_num_pes* local_size);
     nic_addr_t *shmem_nics_2 = shmem_malloc(local_size);
     memcpy(shmem_nics_2, local_nics, local_size);
     PRINT_DEBUG("Beginning shmem collect\n");
@@ -2814,7 +2838,7 @@ int shmem_collective_nic_initialization(void){
     shmem_free(shmem_nics_2);
     shmem_free(shmem_nics);
     shmem_nics_2 = NULL;
-    shmem_nics = NULL;*/
+    shmem_nics = NULL;
 
 
     for (i = 0; i < ctx->num_nics ; i++){
@@ -2833,12 +2857,13 @@ int shmem_collective_nic_initialization(void){
                 i, ctx->NIC_array[i].rank,
                 ctx->NIC_array[i].hsn,
                 ctx->NIC_array[i].nic);
+        ctx->NIC_array[i].rank = i;
     }
 
     PRINT_DEBUG("Starting to add NIC addresses\n");
     for (i = 0; i < ctx->num_nics; i++){
         alladdrs[i].nic = ctx->NIC_array[i].nic;
-        alladdrs[i].pid = ctx->NIC_array[i].rank;
+        alladdrs[i].pid = 1;
     }
 
     for (i = 0; i < ctx->num_nics; i++){
@@ -3262,6 +3287,7 @@ static int shmem_transport_ofi_target_ep_init(void)
     ret = fi_enable(shmem_transport_ofi_CXI_target_ep);
     OFI_CHECK_RETURN_STR(ret, "fi_enable on coll_target endpoint failed");
 
+ 
     return 0;
 }
 

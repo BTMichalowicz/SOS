@@ -47,7 +47,7 @@ void shmem_internal_sync_tree(int PE_start, int PE_stride, int PE_size, long *pS
 void shmem_internal_sync_dissem(int PE_start, int PE_stride, int PE_size, long *pSync);
 void shmem_internal_sync_hw_accel(int PE_start, int PE_stride, int PE_size, long *pSync);
 
-
+void shmemx_internal_sync_all(int PE_start, int PE_stride, int PE_size, long *pSync);
 
 static inline void shmem_internal_sync_sw(int PE_start, int PE_stride, int PE_size, long *pSync){
     if (shmem_internal_params.BARRIERS_FLUSH) {
@@ -150,10 +150,19 @@ shmem_internal_barrier(int PE_start, int PE_stride, int PE_size, long *pSync)
 }
 
 
+static inline void shmemx_internal_barrier_all(){
+
+    shmem_internal_quiet(SHMEM_CTX_DEFAULT);
+    shmem_internal_sync_hw_accel(0, 1, shmem_internal_num_pes, shmem_internal_barrier_all_psync);
+}
+    
+
+
 static inline
 void
 shmem_internal_barrier_all(void)
 {
+    PRINT_DEBUG("Coming from internal_barrier_all\n");
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
     shmem_internal_sync(0, 1, shmem_internal_num_pes, shmem_internal_barrier_all_psync);
 }
