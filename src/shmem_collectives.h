@@ -18,6 +18,8 @@
 
 #include "shmem_synchronization.h"
 
+#define int_str(x) #x
+#define stringify(x) int_str(x)
 
 enum coll_type_t {
     AUTO = 0,
@@ -150,11 +152,11 @@ shmem_internal_barrier(int PE_start, int PE_stride, int PE_size, long *pSync)
 }
 
 
-static inline void shmemx_internal_barrier_all(){
+/*static inline void shmemx_internal_barrier_all(){
 
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
     shmem_internal_sync_hw_accel(0, 1, shmem_internal_num_pes, shmem_internal_barrier_all_psync);
-}
+}*/
     
 
 
@@ -235,6 +237,35 @@ void shmem_internal_op_to_all_hw_accel(void *target, const void *source, size_t 
                                    void *pWrk, long *pSync,
                                    shm_internal_op_t op, shm_internal_datatype_t datatype);
 
+static inline int datatye_supported(shm_internal_datatyoe_t dtype){
+    switch (dtype){
+        case SHM_INTERNAL_SHORT:
+        case SHM_INTERNAL_SIGNED_BYTE:
+        case SHM_INTERNAL_INT:
+        case SHM_INTERNAL_LONG:
+        case SHM_INTERNAL_LONG_LONG:
+        case SHM_INTERNAL_INT8:
+        case SHM_INTERNAL_INT16:
+        case SHM_INTERNAL_INT32:
+        case SHM_INTERNAL_INT64:
+        case SHM_INTERNAL_USHORT:
+        case SHM_INTERNAL_UINT:
+        case SHM_INTERNAL_ULONG:
+        case SHM_INTERNAL_ULONGLONG:
+        case SHM_INTERNAL_UINT8:
+        case SHM_INTERNAL_UINT16:
+        case SHM_INTERNAL_UINT32:
+        case SHM_INTERNAL_UINT64:
+        case SHM_INTERNAL_SIZE_T:
+        case SHM_INTERNAL_PTRDIFF_T:
+        case SHM_INTERNAL_DOUBLE:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+
 static inline
 void
 shmem_internal_op_to_all(void *target, const void *source, size_t count,
@@ -302,9 +333,17 @@ shmem_internal_op_to_all(void *target, const void *source, size_t count,
                                                pWrk, pSync, op, datatype);
             break;
         case HW_ACCEL:
-            shmem_internal_op_to_all_hw_accel(target, source, count, type_size,
-                                                PE_start, PE_stride, PE_size,
-                                                pWrk, pSync, op, datatype);
+            if (datatype_supported(datatype)){
+                shmem_internal_op_to_all_hw_accel(target, source, count, type_size,
+                        PE_start, PE_stride, PE_size,
+                        pWrk, pSync, op, datatype);
+            }else{
+                RAISE_WARN_MSG("Datatype currently not supported by hardware acceleration (%d/%s). Resorting to recursive doubling\n", datatype, stringify(datatype));
+                shmem_internal_op_to_all_recdbl_sw(target, source, count, type_size,
+                        PE_start, PE_stride, PE_size,
+                        pWrk, pSync, op, datatype);
+
+            }
             break;
         default:
             RAISE_ERROR_MSG("Illegal reduction type (%d)\n",

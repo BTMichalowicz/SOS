@@ -100,6 +100,10 @@ struct fid_cntr                 *coll_send_cntr,
                                 *coll_write_cntr,
                                 *coll_rem_cntr;
 
+avset_ary_t                     shmem_ofi_set_ary;
+d_entry_t                       shmem_ofi_d_entry;
+uint64_t                        shmem_ofi_mc;
+
 
 #if ENABLE_TARGET_CNTR
 struct fid_cntr*                shmem_transport_ofi_target_cntrfd;
@@ -1916,11 +1920,11 @@ int initialize_avset(int PE_start, int PE_stride, int PE_size){
     return err;
 }
 
-static inline enum fi_datatype find_type_name (char *dtype_string, int len, int *idx){
+static inline enum fi_datatype find_type_name (char *dtype_string, int *idx){
     int i = 0;
     enum fi_datatype ret = FI_VOID;
     for (i = 0; i < OSHMEM_STANDARD_len ; i++){
-        if (strncmp(dtype_string, coll_type_arr[i].type, len) == 0 ){
+        if (strcmp(dtype_string, coll_type_arr[i].type) == 0 ){
             *idx = i;
             ret = coll_type_arr[i].match;
             return ret;
@@ -1954,6 +1958,60 @@ static inline int batch_polling_time (shmem_transport_ctx_t *ctx, void **context
     return 0;
 }
 
+
+int first_iterations = 30;
+
+
+void shmem_transport_coll_reduce(void *target, const void *source, size_t count, size_t type_size,
+                                int PE_start, int PE_stride, int PE_size,
+                                void *pWrk, long *pSync,
+                                shm_internal_op_t op, shm_internal_datatype_t datatype)
+
+{
+    int ret = FI_SUCCESS, count = 0,
+        num_chunks = 0, idx = 0;
+
+    enum fi_datatype = FI_VOID;
+    struct fid_ep *ep = ctx->CXI_ep;
+
+    dtype = find_type_name(coll_type_string, &idx);
+
+    uint64_t context = 0;
+    const int max_inflight = 8;
+    uint64_t contexts[max_inflight];
+    void    *contexts[max_inflight];
+    memset(contexts, 0, max_inflight * sizeof(uint64_t));
+    memset(context_peers, 0, sizeof(void *)*max_inflight);
+
+    int chunck_elems = 32/coll_type_arr[idx].size;
+    int offset = 0;
+    int posted = 0;
+    size_t cur_count = 0;
+
+    if ( count * type_size <= 32 ){
+        do {
+            
+            ret = fi_allreduce(ep, source, count, NULL,
+                    target, NULL, shmem_ofi_mc, dtype,
+
+            ret = fi_broadcast(ep, target, nelems, NULL, shmem_ofi_mc,
+                shmem_transport_ofi_CXI_addr_table[PE_root],
+                dtype, 0L, context_peers[0]);
+ 
+        OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+        cq_poll(ctx); 
+        } while (ret == -FI_EAGAIN);
+        OFI_CHECK_ERROR_MSG(ret && ret != FI_EAGAIN, "Bcast actually failed %d %s\n", ret, fi_strerror(ret));
+        return;
+    }
+
+
+
+
+
+
+
+}
 void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                             int PE_root, int PE_start, int PE_stride, int PE_size,
                             long *pSync, int complete){
@@ -1966,10 +2024,12 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
     int idx = 0;
     enum fi_datatype dtype;
 
-    dtype = find_type_name(coll_type_string, strlen(coll_type_string), &idx);
+    dtype = find_type_name(coll_type_string, &idx);
 
-    if (dtype == FI_VOID){
-        PRINT_ERROR("WARNING: Unsupported datatype for broadcast.\n");
+    PRINT_DEBUG("Dtype: %d, coll_type_string: %s\n", dtype, coll_type_arr[idx].type);
+
+    if (dtype == FI_VOID || dtype == FI_FLOAT_COMPLEX || dtype == FI_LONG_DOUBLE || dtype == FI_LONG_DOUBLE_COMPLEX || dtype == FI_FLOAT16 || dtype == FI_BFLOAT16){
+        PRINT_ERROR("WARNING: Unsupported datatype for broadcast: %d.\n", dtype);
         shmem_global_exit(-FI_EINVAL);
     }
 
@@ -1990,7 +2050,7 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
 
     
 #if 1
-    avset_ary_t setary;
+ /*   avset_ary_t setary;
     d_entry_t joinlist;
 
     uint64_t mc; 
@@ -2000,10 +2060,42 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
     OFI_CHECK_ERROR_MSG(ret, "Failed to perform a join %d: %s\n", ret, fi_strerror(ret));
 
     mc = _simple_get_mc(&joinlist);
-    OFI_CHECK_ERROR_MSG(!mc, "Failed to get the MC for bcast\n");
+    OFI_CHECK_ERROR_MSG(!mc, "Failed to get the MC for bcast\n"); */
 
-   
+    int lk = 0;
+#if BEN_DEBUG
+    if (shmem_internal_my_pe == 0 && lk < first_iterations){
+        fprintf(stdout, "doing HW-based broadcast for %lu bytes of datatype %s\n", len, coll_type_string);
+        lk++;
+
+        fprintf(stdout, "First 8 bytes of the source buffer: ");
+        unsigned char *tgt = (unsigned char*)source;
+        int qi = 0;
+        for (qi = 0; qi<8; qi++){
+            fprintf(stdout, "%02hhX, ", tgt[qi]);
+        }
+        fprintf(stdout, "\n");
+
+    }
+#endif /* BEN_DEBUG */
+
+    if (len <= 32){
+        do {
+        ret = fi_broadcast(ep, target, nelems, NULL, shmem_ofi_mc,
+                shmem_transport_ofi_CXI_addr_table[PE_root],
+                dtype, 0L, context_peers[0]);
+ 
+        OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+        cq_poll(ctx); 
+        } while (ret == -FI_EAGAIN);
+        OFI_CHECK_ERROR_MSG(ret && ret != FI_EAGAIN, "Bcast actually failed %d %s\n", ret, fi_strerror(ret));
+        return;
+    }
+        
+
+
     while (offset < len) {
+        PRINT_DEBUG("Offset: %d, len %lu, cur_count %d\n", offset, len, cur_count);
         posted = 0;
         while (posted < max_inflight && offset < len) { 
             cur_count = len - offset;
@@ -2012,11 +2104,11 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
 
             context_peers[posted] = &contexts[posted];
             if (shmem_my_pe() == PE_root){
-                memcpy(&target[offset], &source[offset], cur_count * sz);
+                memcpy(target + offset, source + offset, cur_count * sz);
             }
             
-            ret = fi_broadcast(ep, &target[offset], cur_count, NULL,
-                    mc, 
+            ret = fi_broadcast(ep, target+offset, cur_count, NULL,
+                    shmem_ofi_mc, 
                     shmem_transport_ofi_CXI_addr_table[PE_root],
                     dtype, 0L,
                     context_peers[posted]);
@@ -2029,7 +2121,7 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                 do {
                 } while(cq_poll(ctx) == NULL);
             }
-            OFI_CHECK_ERROR_MSG(ret, "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+            OFI_CHECK_ERROR_MSG((ret != FI_SUCCESS && ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
             offset += cur_count;
             posted++;
         }
@@ -2037,6 +2129,20 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
             batch_polling_time(ctx, context_peers, posted, max_inflight);
         }
     }
+
+#if BEN_DEBUG
+    if (shmem_internal_my_pe == PE_size - PE_stride && lk < first_iterations){
+        fprintf(stdout, "First 8 bytes of the dest buffer: ");
+        unsigned char *tgt = (unsigned char*)target;
+        int qi = 0;
+        for (qi = 0; qi<8; qi++){
+            fprintf(stdout, "%02hhX, ", tgt[qi]);
+        }
+        fprintf(stdout, "\n");
+    }
+#endif /* BEN_DEBUG */
+
+
 
 
 #else
@@ -2113,33 +2219,34 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
 
 }
 
-
 void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
     
     int ret = FI_SUCCESS;
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
 #if 1
     struct fid_ep *ep = ctx->CXI_ep;
+    uint64_t context = 0;
+    
 
-    avset_ary_t setary;
+   /* avset_ary_t setary;
     d_entry_t joinlist;
-    uint64_t context;
+    
     uint64_t mc; 
     ret = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, PE_size,
             &setary, &joinlist, PE_stride, PE_start);
 
     OFI_CHECK_ERROR_MSG(ret, "Failed to perform a join %d: %s\n", ret, fi_strerror(ret));
 
-    mc = _simple_get_mc(&joinlist);
+    mc = _simple_get_mc(&shmem_ofi_d_entry);
 
     PRINT_DEBUG("mc: 0x%lx\n", mc);
-    OFI_CHECK_ERROR_MSG(mc == 0, "Failed to get the MC for barrier\n");
+    OFI_CHECK_ERROR_MSG(mc == 0, "Failed to get the MC for barrier\n");*/
 
-    ret = fi_barrier(ep, mc, &context);
+    ret = fi_barrier(ep, shmem_ofi_mc, &context);
     OFI_CHECK_ERROR_MSG(ret, "Failed to barrier: %d %s\n", ret, fi_strerror(ret));
     cq_wait(ctx, &context);
 
-    avset_ary_destroy(&setary);
+ //   avset_ary_destroy(&setary);
 
 
 #else
@@ -2827,13 +2934,24 @@ int shmem_collective_nic_initialization(void){
  //   err = socket_allgather(ctx, local_size, local_nics, ctx->NIC_array);
  //   OFI_CHECK_RETURN_MSG(err, "failed to perform a socket-based allgather on the NICS %d %s\n", err, fi_strerror(err));
 
+#ifndef USE_PMIX
+    shmem_runtime_barrier();
+#endif
+
+
     nic_addr_t *shmem_nics = shmem_malloc(shmem_internal_num_pes* local_size);
+
     nic_addr_t *shmem_nics_2 = shmem_malloc(local_size);
     memcpy(shmem_nics_2, local_nics, local_size);
     PRINT_DEBUG("Beginning shmem collect\n");
     shmem_fcollectmem(SHMEM_TEAM_WORLD, shmem_nics, shmem_nics_2, local_size); 
     PRINT_DEBUG("SHMEM Collect worked\n");
     memcpy(ctx->NIC_array, shmem_nics, local_size*shmem_internal_num_pes);
+
+#ifndef USE_PMIX
+    shmem_runtime_barrier();
+#endif
+
     PRINT_DEBUG("Memcpy worked\n");
     shmem_free(shmem_nics_2);
     shmem_free(shmem_nics);
@@ -2920,6 +3038,20 @@ int shmem_collective_nic_initialization(void){
  //   OFI_CHECK_RETURN_STR(err, "fi_av_lookup test failed\n");
  //
  //   PRINT_DEBUG("my_addr 0x%lx caddr %05x\n", myaddr, internal_addr.nic);
+
+    
+    struct fid_ep *ep = ctx->CXI_ep;
+    /* default stride is 1, default starting point is 0 */
+    err = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, shmem_internal_num_pes,
+            &shmem_ofi_set_ary, &shmem_ofi_d_entry, 1, 0);
+
+    OFI_CHECK_ERROR_MSG(err, "Failed to perform a join for the default ctx: %d %s\n", err, fi_strerror(err));
+    
+    shmem_ofi_mc = _simple_get_mc(&shmem_ofi_d_entry);
+    OFI_CHECK_ERROR_MSG(shmem_ofi_mc == 0, "Failed to get the multicast pointer: 0x%lx\n", shmem_ofi_mc);
+    
+
+
 
     return FI_SUCCESS;
 

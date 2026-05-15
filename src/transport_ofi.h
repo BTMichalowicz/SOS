@@ -369,6 +369,11 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                             int PE_root, int PE_start, int PE_stride, int PE_size,
                             long *pSync, int complete);
 
+void shmem_transport_coll_reduce(target, source, count, type_size,
+            PE_start, PE_stride, PE_size, *pWrk, pSync,
+            op, datatype);
+
+
 #ifdef USE_CTX_LOCK
 #define SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx)                                       \
     do {                                                                        \
