@@ -237,7 +237,7 @@ void shmem_internal_op_to_all_hw_accel(void *target, const void *source, size_t 
                                    void *pWrk, long *pSync,
                                    shm_internal_op_t op, shm_internal_datatype_t datatype);
 
-static inline int datatye_supported(shm_internal_datatyoe_t dtype){
+static inline int datatype_supported(shm_internal_datatype_t dtype){
     switch (dtype){
         case SHM_INTERNAL_SHORT:
         case SHM_INTERNAL_SIGNED_BYTE:
@@ -251,7 +251,7 @@ static inline int datatye_supported(shm_internal_datatyoe_t dtype){
         case SHM_INTERNAL_USHORT:
         case SHM_INTERNAL_UINT:
         case SHM_INTERNAL_ULONG:
-        case SHM_INTERNAL_ULONGLONG:
+        case SHM_INTERNAL_ULONG_LONG:
         case SHM_INTERNAL_UINT8:
         case SHM_INTERNAL_UINT16:
         case SHM_INTERNAL_UINT32:

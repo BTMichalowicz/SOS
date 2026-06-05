@@ -618,7 +618,7 @@ shmem_internal_op_to_all_hw_accel(void *target, const void *source, size_t count
                                 shm_internal_op_t op, shm_internal_datatype_t datatype)
 {
     shmem_transport_coll_reduce(target, source, count, type_size,
-            PE_start, PE_stride, PE_size, *pWrk, pSync,
+            PE_start, PE_stride, PE_size, pWrk, pSync,
             op, datatype);
 }
 
