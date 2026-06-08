@@ -241,7 +241,7 @@ shmem_team_sync(shmem_team_t team)
         SHMEM_ERR_CHECK_OVERLAP(target, source, sizeof(TYPE)*nreduce,   \
                                 sizeof(TYPE)*nreduce, 1, 1);            \
                                                                         \
-        memcpy(coll_type_string, #$STYPE, strlen(#STYPE));              \
+        memcpy(coll_type_string, #STYPE, strlen(#STYPE));              \
         shmem_internal_op_to_all(target, source, nreduce, sizeof(TYPE), \
                                  PE_start, 1 << logPE_stride, PE_size,  \
                                  pWrk, pSync, IOP, ITYPE);              \
