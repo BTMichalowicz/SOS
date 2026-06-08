@@ -56,7 +56,6 @@ typedef int shmem_transport_ct_t;
 extern struct fid_ep* shmem_transport_ofi_target_ep;
 extern struct fid_mc *coll_mc;
 extern struct fid_av* shmem_transport_ofi_avfd;
-//extern struct fid_av_set_attr shmem_transport_ofi_avset_attr;
 extern struct fid_av_set* shmem_transport_ofi_avset;
 
 
@@ -304,33 +303,6 @@ typedef enum fi_op       shm_internal_op_t;
 
 #define SHMEM_TRANSPORT_OFI_TYPE_BOUNCE 0x01
 #define SHMEM_TRANSPORT_OFI_TYPE_LONG   0x02
-
-
-/* Internal datatypes */
-/*#define SHM_INTERNAL_INT8               FI_INT8
-#define SHM_INTERNAL_INT16              FI_INT16
-#define SHM_INTERNAL_INT32              FI_INT32
-#define SHM_INTERNAL_INT64              FI_INT64
-#define SHM_INTERNAL_INT128             FI_INT128
-#define SHM_INTERNAL_UINT8              FI_UINT8
-#define SHM_INTERNAL_UINT16             FI_UINT16
-#define SHM_INTERNAL_UINT32             FI_UINT32
-#define SHM_INTERNAL_UINT64             FI_UINT64
-#define SHM_INTERNAL_UINT128            FI_UINT128
-#define SHM_INTERNAL_FLOAT              FI_FLOAT
-#define SHM_INTERNAL_DOUBLE             FI_DOUBLE
-#define SHM_INTERNAL_FLOAT_COMPLEX      FI_FLOAT_COMPLEX
-#define SHM_INTERNAL_DOUBLE_COMPLEX     FI_DOUBLE_COMPLEX
-#define SHM_INTERNAL_LONG_DOUBLE        FI_LONG_DOUBLE
-#define SHM_INTERNAL_LONG_DBL_CPX       FI_LONG_DOUBLE_COMPLEX
-#define SHM_INTERNAL_FLOAT16            FI_FLOAT_16
-#define SHM_INTERNAL_BFLOAT16           FI_BFLOAT_16
-#define SHM_INTERNAL_FLOAT8_E4M3        FI_FLOAT8_E4M3
-#define SHM_INTERNAL_FLOAT8_E5M2        FI_FLOAT8_E5M2
-#define SHM_INTERNAL_VOID               FI_VOID*/
-
-
-
 
 
 extern fi_addr_t *addr_table;

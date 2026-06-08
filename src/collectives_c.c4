@@ -173,13 +173,6 @@ shmem_barrier_all(void)
     shmem_internal_barrier_all();
 }
 
-
-/*void SHMEM_FUNCTION_ATTRIBUTES
-shmemx_barrier_all(void){
-    SHMEM_ERR_CHECK_INITIALIZED();
-    shmemx_internal_barrier_all();
-}*/
-
 char coll_type_string[coll_dtype_str_len];
 
 void SHMEM_FUNCTION_ATTRIBUTES
@@ -221,7 +214,6 @@ shmem_team_sync(shmem_team_t team)
 
     shmem_internal_team_t *myteam = (shmem_internal_team_t *)team;
     long *psync = shmem_internal_team_choose_psync(myteam, SYNC);
-    PRINT_DEBUG("Coming from inside team_sync\n");
     shmem_internal_sync(myteam->start, myteam->stride, myteam->size, psync);
     shmem_internal_team_release_psyncs(myteam, SYNC);
     return 0;
@@ -249,6 +241,7 @@ shmem_team_sync(shmem_team_t team)
         SHMEM_ERR_CHECK_OVERLAP(target, source, sizeof(TYPE)*nreduce,   \
                                 sizeof(TYPE)*nreduce, 1, 1);            \
                                                                         \
+        memcpy(coll_type_string, #$STYPE, strlen(#STYPE));              \
         shmem_internal_op_to_all(target, source, nreduce, sizeof(TYPE), \
                                  PE_start, 1 << logPE_stride, PE_size,  \
                                  pWrk, pSync, IOP, ITYPE);              \
@@ -268,7 +261,7 @@ shmem_team_sync(shmem_team_t team)
                                 sizeof(TYPE)*nreduce, 1, 1);            \
         TYPE *pWrk = NULL;                                              \
                                                                         \
-        memcpy(coll_type_string, #$STYPE, strlen(#STYPE));              \
+        memcpy(coll_type_string, #STYPE, strlen(#STYPE));              \
         shmem_internal_team_t *myteam = (shmem_internal_team_t *)team;  \
         long *psync = shmem_internal_team_choose_psync(myteam, REDUCE); \
         shmem_internal_op_to_all(dest, source, nreduce, sizeof(TYPE),   \

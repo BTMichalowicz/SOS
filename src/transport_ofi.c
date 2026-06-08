@@ -187,7 +187,7 @@ size_t                          shmem_transport_ofi_bounce_buffer_size;
 long                            shmem_transport_ofi_max_bounce_buffers;
 size_t                          shmem_transport_ofi_addrlen;
 
-size_t                          shmem_transport_ofi_CXI_addrlen = 0;
+size_t                          shmem_transport_ofi_CXI_addrlen;
 #ifdef ENABLE_MR_RMA_EVENT
 int                             shmem_transport_ofi_mr_rma_event;
 #endif
@@ -1727,16 +1727,16 @@ int publish_coll_av_info(struct fabric_info *info){
     size_t epnamelen = sizeof(epname);
     ret = fi_getname((fid_t)shmem_transport_ofi_CXI_target_ep, epname,
             &epnamelen);
-   if (ret != 0 || (epnamelen > sizeof(epname))){
-       RAISE_WARN_STR("fi_getname failed");
-       return ret;
-   }
+    if (ret != 0 || (epnamelen > sizeof(epname))){
+        RAISE_WARN_STR("fi_getname failed");
+        return ret;
+    }
 
-   ret = shmem_runtime_put("fi_coll_epname", epname, epnamelen);
-   OFI_CHECK_RETURN_STR(ret, "shmem_runtime_put fi_epname failed");
+    ret = shmem_runtime_put("fi_coll_epname", epname, epnamelen);
+    OFI_CHECK_RETURN_STR(ret, "shmem_runtime_put fi_epname failed");
 
-   shmem_transport_ofi_CXI_addrlen = epnamelen;
-   return ret;
+    shmem_transport_ofi_CXI_addrlen = epnamelen;
+    return ret;
 }
 
 static inline
@@ -1992,7 +1992,7 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
         num_chunks = 0, idx = 0;
 
     enum fi_datatype dtype = FI_VOID;
-   shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
+    shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
     struct fid_ep *ep = ctx->CXI_ep;
     dtype = find_type_name(coll_type_string, &idx);
 
@@ -2011,17 +2011,11 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
 
     if ( count * type_size <= 32 ){
         do {
-            
             ret = fi_allreduce(ep, source, count, NULL,
                     target, NULL, shmem_ofi_mc, dtype,
-                    red_op, 0, context_peers[0]);
-
-//            ret = fi_broadcast(ep, target, nelems, NULL, shmem_ofi_mc,
-//                shmem_transport_ofi_CXI_addr_table[PE_root],
- //               dtype, 0L, context_peers[0]);
- 
-        OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
-        cq_poll(ctx); 
+                    red_op, 0, context_peers[0]);  
+            OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+            cq_poll(ctx); 
         } while (ret == -FI_EAGAIN);
         OFI_CHECK_ERROR_MSG(ret && ret != FI_EAGAIN, "Bcast actually failed %d %s\n", ret, fi_strerror(ret));
         return;
@@ -2029,6 +2023,7 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
 
 
 }
+
 void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                             int PE_root, int PE_start, int PE_stride, int PE_size,
                             long *pSync, int complete){
@@ -2881,7 +2876,8 @@ static int socket_allgather (shmem_transport_ctx_t *ctx, size_t size, void *data
 int shmem_collective_nic_initialization(void){
 
 
-#if 0
+
+/*
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
     int err = FI_SUCCESS, i = 0, local_size = 0;
     internal_addr_t *alladdrs = NULL;
@@ -2942,17 +2938,14 @@ int shmem_collective_nic_initialization(void){
                 local_nics[0].nic);
     }
 
-
     PRINT_DEBUG("Local NICs retrieved\n");
 
+    //   err = socket_allgather(ctx, local_size, local_nics, ctx->NIC_array);
+    //   OFI_CHECK_RETURN_MSG(err, "failed to perform a socket-based allgather on the NICS %d %s\n", err, fi_strerror(err));
 
- //   err = socket_allgather(ctx, local_size, local_nics, ctx->NIC_array);
- //   OFI_CHECK_RETURN_MSG(err, "failed to perform a socket-based allgather on the NICS %d %s\n", err, fi_strerror(err));
-
-//#ifndef USE_PMIX
-//    shmem_runtime_barrier();
-//#endif
-
+    //#ifndef USE_PMIX
+    //    shmem_runtime_barrier();
+    //#endif
 
     nic_addr_t *shmem_nics = shmem_malloc(shmem_internal_num_pes* local_size);
 
@@ -2963,9 +2956,9 @@ int shmem_collective_nic_initialization(void){
     PRINT_DEBUG("SHMEM Collect worked\n");
     memcpy(ctx->NIC_array, shmem_nics, local_size*shmem_internal_num_pes);
 
-//#ifndef USE_PMIX
-//    shmem_runtime_barrier();
-//#endif
+    //#ifndef USE_PMIX
+    //    shmem_runtime_barrier();
+    //#endif
 
     PRINT_DEBUG("Memcpy worked\n");
     shmem_free(shmem_nics_2);
@@ -2973,14 +2966,12 @@ int shmem_collective_nic_initialization(void){
     shmem_nics_2 = NULL;
     shmem_nics = NULL;
 
-
     for (i = 0; i < ctx->num_nics ; i++){
         PRINT_DEBUG("Pre-sort ctx i %d rank=%2d hsn=%d nic=%05x\n",
                 i, ctx->NIC_array[i].rank,
                 ctx->NIC_array[i].hsn,
                 ctx->NIC_array[i].nic);
     }
-
 
     PRINT_DEBUG("Sorting NICs\n");
     qsort(ctx->NIC_array, ctx->num_nics, NICSIZE, _compare);
@@ -3027,9 +3018,8 @@ int shmem_collective_nic_initialization(void){
         goto fail;
     }
 
-   ctx->rx_cq = shmem_transport_ofi_CXI_recv_cq;
-   ctx->coll_tx_cq = shmem_transport_ofi_CXI_target_cq; 
-     
+    ctx->rx_cq = shmem_transport_ofi_CXI_recv_cq;
+    ctx->coll_tx_cq = shmem_transport_ofi_CXI_target_cq; 
 
     PRINT_DEBUG("shmem_transport_ofi_CXI_avfd: %p\n", shmem_transport_ofi_CXI_avfd);
 
@@ -3044,27 +3034,14 @@ int shmem_collective_nic_initialization(void){
     free(alladdrs2);
 
 
- //   fi_addr_t myaddr;
- //   size_t caddrlen;
- //   internal_addr_t internal_addr;
- //   myaddr = shmem_transport_ofi_CXI_addr_table[shmem_internal_my_pe];
- //   PRINT_DEBUG("my_addr 0x%lx\n", myaddr);
- //   err = fi_av_lookup(shmem_transport_ofi_CXI_avfd, myaddr, &internal_addr, &caddrlen);
- //   OFI_CHECK_RETURN_STR(err, "fi_av_lookup test failed\n");
- //
- //   PRINT_DEBUG("my_addr 0x%lx caddr %05x\n", myaddr, internal_addr.nic);
-
-    
-    struct fid_ep *ep = ctx->CXI_ep;
-    /* default stride is 1, default starting point is 0 */
     err = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, shmem_internal_num_pes,
             &shmem_ofi_set_ary, &shmem_ofi_d_entry, 1, 0);
 
     OFI_CHECK_ERROR_MSG(err, "Failed to perform a join for the default ctx: %d %s\n", err, fi_strerror(err));
-    
+
     shmem_ofi_mc = _simple_get_mc(&shmem_ofi_d_entry);
     OFI_CHECK_ERROR_MSG(shmem_ofi_mc == 0, "Failed to get the multicast pointer: 0x%lx\n", shmem_ofi_mc);
-    
+
 
 
 
@@ -3076,8 +3053,7 @@ fail:
     if (local_nics) free(local_nics);
     PRINT_ERROR("FAILED nic initialization: %d\n", err);
     return err;
-#else
-
+*/
 
     int i = 0, ret = FI_SUCCESS, err = 0;
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
@@ -3129,8 +3105,7 @@ fail:
         return ret;
     }
 
-   struct fid_ep *ep = ctx->CXI_ep;
-    /* default stride is 1, default starting point is 0 */
+      /* default stride is 1, default starting point is 0 */
     err = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, shmem_internal_num_pes,
             &shmem_ofi_set_ary, &shmem_ofi_d_entry, 1, 0);
 
@@ -3141,7 +3116,6 @@ fail:
     
     return FI_SUCCESS;
 
-#endif
 }
 
 
