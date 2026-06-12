@@ -57,7 +57,7 @@ static inline void shmem_internal_sync_sw(int PE_start, int PE_stride, int PE_si
         fflush(stderr);
     }
 
-    PRINT_DEBUG("internal_sync_sw: Barrier type %d\n", shmem_internal_barrier_type);
+  //  PRINT_DEBUG("internal_sync_sw: Barrier type %d\n", shmem_internal_barrier_type);
 
     if (PE_size == 1) return;
 
@@ -164,7 +164,7 @@ static inline
 void
 shmem_internal_barrier_all(void)
 {
-    PRINT_DEBUG("Coming from internal_barrier_all\n");
+    //PRINT_DEBUG("Coming from internal_barrier_all\n");
     shmem_internal_quiet(SHMEM_CTX_DEFAULT);
     shmem_internal_sync(0, 1, shmem_internal_num_pes, shmem_internal_barrier_all_psync);
 }

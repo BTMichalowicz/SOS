@@ -355,6 +355,24 @@ shmem_internal_heap_preinit(int tl_requested, int *tl_provided)
     abort();
 }
 
+static int is_using_hw_accel(void){
+
+    if (shmem_internal_params.BCAST_ALGORITHM_provided){
+        return (0 == (strcmp(shmem_internal_params.BCAST_ALGORITHM,
+        "hw_accel")));
+    }
+    if (shmem_internal_params.REDUCE_ALGORITHM_provided){
+        return (0 == (strcmp(shmem_internal_params.REDUCE_ALGORITHM,
+        "hw_accel")));
+    }
+    if (shmem_internal_params.BARRIER_ALGORITHM_provided){
+        return (0 == (strcmp(shmem_internal_params.BARRIER_ALGORITHM,
+        "hw_accel")));
+    }
+    return 0;
+}
+
+
 int
 shmem_internal_heap_postinit(void)
 {
@@ -526,10 +544,12 @@ shmem_internal_heap_postinit(void)
     shmem_runtime_barrier();
 #endif
 
-    ret = shmem_collective_nic_initialization();
-    if (ret != 0){
-        RETURN_ERROR_MSG("Coll_init for CXI nics failed (%d)\n", ret);
-        goto cleanup_postinit;
+    if(is_using_hw_accel()){ 
+        ret = shmem_collective_nic_initialization();
+        if (ret != 0){
+            RETURN_ERROR_MSG("Coll_init for CXI nics failed (%d)\n", ret);
+            goto cleanup_postinit;
+        }
     }
 
     /* finish up */
