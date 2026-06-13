@@ -1998,7 +1998,6 @@ static inline int batch_polling_time (shmem_transport_ctx_t *ctx, void **context
 
 int first_iterations = 30;
 
-
 void shmem_transport_coll_reduce(void *target, const void *source, size_t count, size_t type_size,
                                 int PE_start, int PE_stride, int PE_size,
                                 void *pWrk, long *pSync,
@@ -2007,6 +2006,8 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
 {
     int ret = FI_SUCCESS, i_count = 0,
         num_chunks = 0, idx = 0;
+
+    const int chunk_size = 32;
 
     enum fi_datatype dtype = FI_VOID;
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
@@ -2021,24 +2022,50 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
     memset(contexts, 0, max_inflight * sizeof(uint64_t));
     memset(context_peers, 0, sizeof(void *)*max_inflight);
 
-    int chunck_elems = 32/coll_type_arr[idx].size;
+    int chunk_elems = chunk_size/coll_type_arr[idx].size;
     int offset = 0;
     int posted = 0;
     size_t cur_count = 0;
 
-    if ( count * type_size <= 32 ){
+    if ( count * type_size <= chunk_size ){
         do {
             ret = fi_allreduce(ep, source, count, NULL,
                     target, NULL, shmem_ofi_mc, dtype,
                     red_op, 0, context_peers[0]);  
-            OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+            OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Reduce failed: %d %s\n", ret, fi_strerror(ret));
             cq_poll(ctx); 
         } while (ret == -FI_EAGAIN);
-        OFI_CHECK_ERROR_MSG(ret && ret != FI_EAGAIN, "Bcast actually failed %d %s\n", ret, fi_strerror(ret));
+        OFI_CHECK_ERROR_MSG(ret && ret != FI_EAGAIN, "Reduce actually failed %d %s\n", ret, fi_strerror(ret));
         return;
     }
+    size_t len = count*type_size;
 
+    while (offset < len) { 
+        posted = 0;
+        while(posted < max_inflight && offset < len) {
+            cur_count = (len - offset) > chunk_elems ? chunk_elems : len-offset;
 
+            context_peers[posted] = &contexts[posted];
+            ret = fi_allreduce(ep, source+offset, cur_count, NULL,
+                    target+offset, NULL, shmem_ofi_mc, dtype,
+                    red_op, 0, context_peers[0]);
+
+            if (ret == -FI_EAGAIN){
+                if (posted > 0){
+                    batch_polling_time(ctx, context_peers, posted, max_inflight);
+                    posted = 0;
+                    continue;
+                }
+                do {} while(cq_poll(ctx) == NULL);  
+            }
+            OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Reduce failed: %d %s\n", ret, fi_strerror(ret));
+            offset+= cur_count;
+            posted++;
+        }
+        if(posted > 0){
+            batch_polling_time(ctx, context_peers, posted, max_inflight);
+        }
+    }
 }
 
 void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
