@@ -1995,9 +1995,7 @@ static inline int batch_polling_time (shmem_transport_ctx_t *ctx, void **context
     return 0;
 }
 
-
-int first_iterations = 30;
-
+static int first_iterations = 30;
 void shmem_transport_coll_reduce(void *target, const void *source, size_t count, size_t type_size,
                                 int PE_start, int PE_stride, int PE_size,
                                 void *pWrk, long *pSync,
@@ -2023,6 +2021,8 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
     memset(context_peers, 0, sizeof(void *)*max_inflight);
 
     int chunk_elems = chunk_size/coll_type_arr[idx].size;
+    PRINT_DEBUG("Chunk elem %d, coll_type_arr size: %d\n",
+            chunk_elems, coll_type_arr[idx].size);
     int offset = 0;
     int posted = 0;
     size_t cur_count = 0;
@@ -2035,31 +2035,31 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
             OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Reduce failed: %d %s\n", ret, fi_strerror(ret));
             cq_poll(ctx); 
         } while (ret == -FI_EAGAIN);
-        OFI_CHECK_ERROR_MSG(ret && ret != FI_EAGAIN, "Reduce actually failed %d %s\n", ret, fi_strerror(ret));
+        OFI_CHECK_ERROR_MSG(ret && ret != -FI_EAGAIN, "Reduce actually failed %d %s\n", ret, fi_strerror(ret));
         return;
     }
     size_t len = count*type_size;
 
-    while (offset < len) { 
+    while (offset < len) {
+        PRINT_DEBUG("Offset: %d, len %lu, cur_count: %d\n", offset, len, cur_count);
         posted = 0;
         while(posted < max_inflight && offset < len) {
-            cur_count = (len - offset) > chunk_elems ? chunk_elems : len-offset;
+            cur_count = (len-offset)/type_size;
+            PRINT_DEBUG("Cur_count %u, chunk_elems: %d\n", cur_count, chunk_elems);
+            if(cur_count > chunk_elems) {
+                cur_count = chunk_elems;
+            }
 
             context_peers[posted] = &contexts[posted];
-            ret = fi_allreduce(ep, source+offset, cur_count, NULL,
-                    target+offset, NULL, shmem_ofi_mc, dtype,
-                    red_op, 0, context_peers[0]);
+           // cq_poll(ctx);
+            do {
+                ret = fi_allreduce(ep, source + offset, cur_count, NULL,
+                        target+offset, NULL, shmem_ofi_mc, dtype,
+                        red_op, 0L, context_peers[posted]);
+            } while (ret == -FI_EAGAIN);
 
-            if (ret == -FI_EAGAIN){
-                if (posted > 0){
-                    batch_polling_time(ctx, context_peers, posted, max_inflight);
-                    posted = 0;
-                    continue;
-                }
-                do {} while(cq_poll(ctx) == NULL);  
-            }
-            OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Reduce failed: %d %s\n", ret, fi_strerror(ret));
-            offset+= cur_count;
+            OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == -FI_EAGAIN), "Reduce failed: %d %s\n", ret, fi_strerror(ret));
+            offset += (chunk_elems * type_size);
             posted++;
         }
         if(posted > 0){
@@ -2141,10 +2141,10 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                 shmem_transport_ofi_CXI_addr_table[PE_root],
                 dtype, 0L, context_peers[0]);
  
-        OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+        OFI_CHECK_ERROR_MSG(!(ret == FI_SUCCESS || ret == -FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
         cq_poll(ctx); 
         } while (ret == -FI_EAGAIN);
-        OFI_CHECK_ERROR_MSG(ret && ret != FI_EAGAIN, "Bcast actually failed %d %s\n", ret, fi_strerror(ret));
+        OFI_CHECK_ERROR_MSG(ret && ret != -FI_EAGAIN, "Bcast actually failed %d %s\n", ret, fi_strerror(ret));
         return;
     }
         
@@ -2177,8 +2177,8 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                 do {
                 } while(cq_poll(ctx) == NULL);
             }
-            OFI_CHECK_ERROR_MSG((ret != FI_SUCCESS && ret == FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
-            offset += cur_count;
+            OFI_CHECK_ERROR_MSG((ret != FI_SUCCESS && ret == -FI_EAGAIN), "Bcast failed: %d %s\n", ret, fi_strerror(ret));
+            offset += (chunk_elems*sz);
             posted++;
         }
         if (posted > 0){
