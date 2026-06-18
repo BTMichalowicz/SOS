@@ -218,7 +218,7 @@ shmem_internal_bcast(void *target, const void *source, size_t len,
                                   PE_stride, PE_size, pSync, complete);
         break;
     case HW_ACCEL:
-        if (bcast_msg_is_okay(PE_size, len)){
+        if (bcast_msg_is_ok(PE_size, len)){
         shmem_internal_bcast_hw_accel(target, source, len, PE_root, PE_start,
                                   PE_stride, PE_size, pSync, complete);
         }else{
@@ -268,8 +268,9 @@ static inline int msg_sz_is_ok(int PE_size, size_t payload){
     }else{
         return payload < 64;
     }
+}
 
-static inline int datatype_and_op_supported(shm_internal_datatype_t dtype, shm_internal_op_t op){
+static int datatype_and_op_supported(shm_internal_datatype_t dtype, shm_internal_op_t op){
     if (op == SHM_INTERNAL_PROD){
         return 0; // 0 == bad here; 1 == success here
     }
@@ -289,25 +290,13 @@ static inline int datatype_and_op_supported(shm_internal_datatype_t dtype, shm_i
         case SHM_INTERNAL_USHORT:
         case SHM_INTERNAL_UINT:
         case SHM_INTERNAL_ULONG:
-            if (op == SHM_INTERNAL_BAND || op == SHM_INTERNAL_BOR || op ==
-                    SHM_INTERNAL_BXOR){
-                return 1;
-            }else{
-                return 0;
-            }
-            break;
+            return (op == SHM_INTERNAL_BAND || op == SHM_INTERNAL_BOR || op == SHM_INTERNAL_BXOR);
         case SHM_INTERNAL_LONG_LONG:
         case SHM_INTERNAL_ULONG_LONG:
         case SHM_INTERNAL_SIZE_T:
         case SHM_INTERNAL_PTRDIFF_T:
         case SHM_INTERNAL_DOUBLE:
-            if (op == SHM_INTERNAL_MIN || op == SHM_INTERNAL_MAX || op ==
-                    SHM_INTERNAL_SUM){
-                return 1;
-            }else{
-                return 0;
-            }
-            break;
+            return (op == SHM_INTERNAL_MIN || op == SHM_INTERNAL_MAX || op == SHM_INTERNAL_SUM);
         default:
             return 0;
     }
@@ -381,8 +370,8 @@ shmem_internal_op_to_all(void *target, const void *source, size_t count,
                                                pWrk, pSync, op, datatype);
             break;
         case HW_ACCEL:
-            if (datatype_and_op_supported(datatype, op) && msg_sz_is_ok(PE_size,
-                count*type_size)){
+            if (datatype_and_op_supported(datatype, op) == 1 && msg_sz_is_ok(PE_size,
+                count*type_size) == 1){
                 shmem_internal_op_to_all_hw_accel(target, source, count, type_size,
                         PE_start, PE_stride, PE_size,
                         pWrk, pSync, op, datatype);
