@@ -121,7 +121,7 @@ shmem_internal_sync(int PE_start, int PE_stride, int PE_size, long *pSync)
         shmem_internal_sync_dissem(PE_start, PE_stride, PE_size, pSync);
         break;
     case HW_ACCEL:
-        if (PE_size >= 64 ){
+        if (PE_size > 32 ){
             shmem_internal_sync_tree(PE_start, PE_stride, PE_size, pSync);
         }else{
             shmem_internal_sync_hw_accel(PE_start, PE_stride, PE_size, pSync);
