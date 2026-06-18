@@ -121,7 +121,11 @@ shmem_internal_sync(int PE_start, int PE_stride, int PE_size, long *pSync)
         shmem_internal_sync_dissem(PE_start, PE_stride, PE_size, pSync);
         break;
     case HW_ACCEL:
-        shmem_internal_sync_hw_accel(PE_start, PE_stride, PE_size, pSync);
+        if (PE_size >= 64 ){
+            shmem_internal_sync_tree(PE_start, PE_stride, PE_size, pSync);
+        }else{
+            shmem_internal_sync_hw_accel(PE_start, PE_stride, PE_size, pSync);
+        }
         break;
     default:
         RAISE_ERROR_MSG("Illegal barrier/sync type (%d)\n",
