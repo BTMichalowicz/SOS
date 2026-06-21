@@ -282,7 +282,6 @@ static int datatype_and_op_supported(shm_internal_datatype_t dtype, shm_internal
         case SHM_INTERNAL_SHORT:
         case SHM_INTERNAL_SIGNED_BYTE:
         case SHM_INTERNAL_INT:
-        case SHM_INTERNAL_LONG:
         case SHM_INTERNAL_UINT8:
         case SHM_INTERNAL_UINT16:
         case SHM_INTERNAL_UINT32:
@@ -296,6 +295,7 @@ static int datatype_and_op_supported(shm_internal_datatype_t dtype, shm_internal
         case SHM_INTERNAL_ULONG:
             return (op == SHM_INTERNAL_BAND || op == SHM_INTERNAL_BOR || op == SHM_INTERNAL_BXOR);
         case SHM_INTERNAL_LONG_LONG:
+        case SHM_INTERNAL_LONG:
         case SHM_INTERNAL_ULONG_LONG:
         case SHM_INTERNAL_SIZE_T:
         case SHM_INTERNAL_PTRDIFF_T:
