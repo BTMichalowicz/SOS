@@ -237,13 +237,18 @@ void shmem_internal_op_to_all_hw_accel(void *target, const void *source, size_t 
                                    void *pWrk, long *pSync,
                                    shm_internal_op_t op, shm_internal_datatype_t datatype);
 
-static inline int datatype_supported(shm_internal_datatype_t dtype){
+static int datatype_and_op_supported(shm_internal_datatype_t dtype, shm_internal_op_t op){
+    if (op == SHM_INTERNAL_PROD){
+        return 0; // 0 == bad here; 1 == success here
+    }
     switch (dtype){
         case SHM_INTERNAL_SHORT:
         case SHM_INTERNAL_SIGNED_BYTE:
         case SHM_INTERNAL_INT:
-        case SHM_INTERNAL_LONG:
-        case SHM_INTERNAL_LONG_LONG:
+        case SHM_INTERNAL_UINT8:
+        case SHM_INTERNAL_UINT16:
+        case SHM_INTERNAL_UINT32:
+        case SHM_INTERNAL_UINT64:
         case SHM_INTERNAL_INT8:
         case SHM_INTERNAL_INT16:
         case SHM_INTERNAL_INT32:
@@ -251,20 +256,19 @@ static inline int datatype_supported(shm_internal_datatype_t dtype){
         case SHM_INTERNAL_USHORT:
         case SHM_INTERNAL_UINT:
         case SHM_INTERNAL_ULONG:
+        case SHM_INTERNAL_LONG:
         case SHM_INTERNAL_ULONG_LONG:
-        case SHM_INTERNAL_UINT8:
-        case SHM_INTERNAL_UINT16:
-        case SHM_INTERNAL_UINT32:
-        case SHM_INTERNAL_UINT64:
+            return (op == SHM_INTERNAL_BAND || op == SHM_INTERNAL_BOR || op == SHM_INTERNAL_BXOR);
+        case SHM_INTERNAL_LONG_LONG:
+
         case SHM_INTERNAL_SIZE_T:
         case SHM_INTERNAL_PTRDIFF_T:
         case SHM_INTERNAL_DOUBLE:
-            return 1;
+            return (op == SHM_INTERNAL_MIN || op == SHM_INTERNAL_MAX || op == SHM_INTERNAL_SUM);
         default:
             return 0;
     }
 }
-
 
 static inline
 void
@@ -333,12 +337,12 @@ shmem_internal_op_to_all(void *target, const void *source, size_t count,
                                                pWrk, pSync, op, datatype);
             break;
         case HW_ACCEL:
-            if (datatype_supported(datatype)){
+            if (datatype_and_op_supported(datatype,op)== 1){
                 shmem_internal_op_to_all_hw_accel(target, source, count, type_size,
                         PE_start, PE_stride, PE_size,
                         pWrk, pSync, op, datatype);
             }else{
-                RAISE_WARN_MSG("Datatype currently not supported by hardware acceleration (%d/%s). Resorting to recursive doubling\n", datatype, stringify(datatype));
+//                RAISE_WARN_MSG("Datatype currently not supported by hardware acceleration (%d/%s). Resorting to recursive doubling\n", datatype, stringify(datatype));
                 shmem_internal_op_to_all_recdbl_sw(target, source, count, type_size,
                         PE_start, PE_stride, PE_size,
                         pWrk, pSync, op, datatype);
