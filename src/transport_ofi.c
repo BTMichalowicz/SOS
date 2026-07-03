@@ -2019,16 +2019,35 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
     void    *context_peers[max_inflight];
     memset(contexts, 0, max_inflight * sizeof(uint64_t));
     memset(context_peers, 0, sizeof(void *)*max_inflight);
-
     int chunk_elems = chunk_size/coll_type_arr[idx].size;
     PRINT_DEBUG("Chunk elem %d, coll_type_arr size: %d\n",
             chunk_elems, coll_type_arr[idx].size);
     int offset = 0;
     int posted = 0;
     size_t cur_count = 0;
+    size_t len = count*type_size;
+    PRINT_DEBUG("Starting fi_based allreduce\n");
+    int lk = 0;
+#if BEN_DEBUG
+    if (shmem_internal_my_pe == 0 && lk < first_iterations){
+        fprintf(stdout, "doing HW-based reduce for %lu bytes of datatype %s\n", len, coll_type_string);
+        lk++;
+
+        fprintf(stdout, "First 8 bytes of the source buffer: ");
+        unsigned char *tgt = (unsigned char*)source;
+        int qi = 0;
+        for (qi = 0; qi<8; qi++){
+            fprintf(stdout, "%02hhX, ", tgt[qi]);
+        }
+        fprintf(stdout, "\n");
+
+    }
+#endif
+
 
     if ( count * type_size <= chunk_size ){
         do {
+            PRINT_DEBUG(" beginning allreduce\n");
             ret = fi_allreduce(ep, source, count, NULL,
                     target, NULL, shmem_ofi_mc, dtype,
                     red_op, 0, context_peers[0]);  
@@ -2036,9 +2055,14 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
             cq_poll(ctx); 
         } while (ret == -FI_EAGAIN);
         OFI_CHECK_ERROR_MSG(ret && ret != -FI_EAGAIN, "Reduce actually failed %d %s\n", ret, fi_strerror(ret));
+   //     batch_polling_time(ctx, context_peers, 1, max_inflight);
+        goto exit_pt;
         return;
     }
-    size_t len = count*type_size;
+    offset = 0;
+    memset(contexts, 0, max_inflight * sizeof(uint64_t));
+    memset(context_peers, 0, sizeof(void *)*max_inflight);
+
 
     while (offset < len) {
         PRINT_DEBUG("Offset: %d, len %lu, cur_count: %d\n", offset, len, cur_count);
@@ -2066,6 +2090,25 @@ void shmem_transport_coll_reduce(void *target, const void *source, size_t count,
             batch_polling_time(ctx, context_peers, posted, max_inflight);
         }
     }
+
+exit_pt:
+#if BEN_DEBUG
+    if (shmem_internal_my_pe == 1 && lk < first_iterations){
+        fprintf(stdout, "doing HW-based reduction for %lu bytes of datatype %s\n", len, coll_type_string);
+        lk++;
+
+        fprintf(stdout, "First 8 bytes of the target buffer: ");
+        unsigned char *tgt = (unsigned char*)target;
+        int qi = 0;
+        for (qi = 0; qi<8; qi++){
+            fprintf(stdout, "%02hhX, ", tgt[qi]);
+        }
+        fprintf(stdout, "\n");
+
+    }
+#endif
+
+    
 }
 
 void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
@@ -2101,11 +2144,10 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
     int offset = 0;
     int posted = 0;
     size_t cur_count = 0;
-    int chunk_elems = 32/coll_type_arr[idx].size; 
+    int chunk_elems = 32/coll_type_arr[idx].size;
     /* Can do 32 bytes for a given item. May increase to 256 later? */
 
     
-#if 1
  /*   avset_ary_t setary;
     d_entry_t joinlist;
 
@@ -2124,16 +2166,20 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
         fprintf(stdout, "doing HW-based broadcast for %lu bytes of datatype %s\n", len, coll_type_string);
         lk++;
 
-        fprintf(stdout, "First 8 bytes of the source buffer: ");
+        fprintf(stdout, "First 4 bytes of the source buffer: ");
         unsigned char *tgt = (unsigned char*)source;
         int qi = 0;
-        for (qi = 0; qi<8; qi++){
+        for (qi = 0; qi<4; qi++){
             fprintf(stdout, "%02hhX, ", tgt[qi]);
         }
         fprintf(stdout, "\n");
 
     }
 #endif /* BEN_DEBUG */
+    if (shmem_internal_my_pe == PE_root){
+        memcpy(target, source, len);
+    }
+
 
     if (len <= 32){
         do {
@@ -2145,11 +2191,10 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
         cq_poll(ctx); 
         } while (ret == -FI_EAGAIN);
         OFI_CHECK_ERROR_MSG(ret && ret != -FI_EAGAIN, "Bcast actually failed %d %s\n", ret, fi_strerror(ret));
+        goto exit_pt;
         return;
     }
         
-
-
     while (offset < len) {
         PRINT_DEBUG("Offset: %d, len %lu, cur_count %d\n", offset, len, cur_count);
         posted = 0;
@@ -2159,9 +2204,6 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
                 cur_count = chunk_elems;
 
             context_peers[posted] = &contexts[posted];
-            if (shmem_my_pe() == PE_root){
-                memcpy(target + offset, source + offset, cur_count * sz);
-            }
             
             ret = fi_broadcast(ep, target+offset, cur_count, NULL,
                     shmem_ofi_mc, 
@@ -2186,12 +2228,13 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
         }
     }
 
+exit_pt:
 #if BEN_DEBUG
-    if (shmem_internal_my_pe == PE_size - PE_stride && lk < first_iterations){
-        fprintf(stdout, "First 8 bytes of the dest buffer: ");
+    if (shmem_internal_my_pe == 1 && lk < first_iterations){
+        fprintf(stdout, "First 4 bytes of the dest buffer: ");
         unsigned char *tgt = (unsigned char*)target;
         int qi = 0;
-        for (qi = 0; qi<8; qi++){
+        for (qi = 0; qi<4; qi++){
             fprintf(stdout, "%02hhX, ", tgt[qi]);
         }
         fprintf(stdout, "\n");
@@ -2200,154 +2243,24 @@ void shmem_transport_coll_bcast(void *target, const void *source, size_t len,
 
 
 
-
-#else
- 
-    ret = initialize_avset(PE_start, PE_stride, PE_size);
-    OFI_CHECK_ERROR_MSG(ret, "failed to initialize avset: %d %s", ret, fi_strerror(ret));
-
-
-    PRINT_DEBUG("Starting collective join\n");
-    ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
-                             shmem_transport_ofi_CXI_avfd_set,
-                             0, &ofi_coll_mc, &context);
-
-    if (ret != FI_SUCCESS){
-        PRINT_ERROR("Collective join failed!! %d %s\n", ret, fi_strerror(ret));
-    }
-
-    PRINT_DEBUG("Heading to wait_for_join...\n");
-
- //   OFI_CHECK_RETURN_MSG(ret, "collective_join failed!! %d %s", ret, fi_strerror(ret));
-
-    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &context);
-    OFI_CHECK_RETURN_STR(ret, "join_wait time failed\n");
-    if (ofi_coll_mc == NULL){
-        PRINT_ERROR("coll_mc is NULL\n");
-        shmem_global_exit(-FI_EINVAL);
-    }
-    PRINT_DEBUG("Coll_mc %p\n", ofi_coll_mc);
-
-
-
-    shmem_transport_ofi_CXI_coll_addr = fi_mc_addr(ofi_coll_mc);
-
-    while (offset < len) {
-        posted = 0;
-        while (posted < max_inflight && offset < len) { 
-            cur_count = len - offset;
-            if (cur_count > chunk_elems)
-                cur_count = chunk_elems;
-
-            context_peers[posted] = &contexts[posted];
-            if (shmem_my_pe() == PE_root){
-                memcpy(&target[offset], &source[offset], cur_count * sz);
-            }
-            
-            ret = fi_broadcast(ep, &target[offset], cur_count, NULL,
-                    shmem_transport_ofi_CXI_coll_addr, 
-                    shmem_transport_ofi_CXI_addr_table[PE_root],
-                    dtype, 0L,
-                    context_peers[posted]);
-            if (ret == -FI_EAGAIN){
-                if (posted > 0){
-                    batch_polling_time(ctx, context_peers, posted, max_inflight);
-                    posted = 0;
-                    continue;
-                }
-                do {
-                } while(cq_poll(ctx) == NULL);
-            }
-            OFI_CHECK_ERROR_MSG(ret, "Bcast failed: %d %s\n", ret, fi_strerror(ret));
-            offset += cur_count;
-            posted++;
-        }
-        if (posted > 0){
-            batch_polling_time(ctx, context_peers, posted, max_inflight);
-        }
-//            ret = polling_time(ctx, &context);
-//            OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
-    }
-
-
-
-#endif /*if 0 for bcast */
-
 }
 
 void shmem_transport_coll_sync(int PE_start, int PE_stride, int PE_size, long *pSync){
     
     int ret = FI_SUCCESS;
     shmem_transport_ctx_t *ctx = &shmem_transport_ctx_default;
-#if 1
     struct fid_ep *ep = ctx->CXI_ep;
     uint64_t context = 0;
-    
 
-   /* avset_ary_t setary;
-    d_entry_t joinlist;
-    
-    uint64_t mc; 
-    ret = _simple_join(ctx, shmem_transport_ofi_CXI_addr_table, PE_size,
-            &setary, &joinlist, PE_stride, PE_start);
-
-    OFI_CHECK_ERROR_MSG(ret, "Failed to perform a join %d: %s\n", ret, fi_strerror(ret));
-
-    mc = _simple_get_mc(&shmem_ofi_d_entry);
-
-    PRINT_DEBUG("mc: 0x%lx\n", mc);
-    OFI_CHECK_ERROR_MSG(mc == 0, "Failed to get the MC for barrier\n");*/
-
+    do {
     ret = fi_barrier(ep, shmem_ofi_mc, &context);
+    }while (ret == -FI_EAGAIN);
     OFI_CHECK_ERROR_MSG(ret, "Failed to barrier: %d %s\n", ret, fi_strerror(ret));
     cq_wait(ctx, &context);
 
  //   avset_ary_destroy(&setary);
 
 
-#else
-    uint64_t done_flag = 0;
-
-    struct fid_ep *ep = ctx->CXI_ep;
-    PRINT_DEBUG("Starting join with addr_table %p, PE_start %d, PE_stride %d, PE_size %d\n",
-            shmem_transport_ofi_CXI_addr_table, PE_start, PE_stride, PE_size);
-
-
-    ret = initialize_avset(PE_start, PE_stride, PE_size);
-    OFI_CHECK_ERROR_MSG(ret, "failed to initialize avset: %d %s", ret, fi_strerror(ret));
-
-
-    PRINT_DEBUG("Starting collective join\n");
-    ret = fi_join_collective(ep, FI_ADDR_NOTAVAIL,
-                             shmem_transport_ofi_CXI_avfd_set,
-                             0, &ofi_coll_mc, &done_flag);
-
-    if (ret != FI_SUCCESS){
-        PRINT_ERROR("collective join failed %d %s\n", ret, fi_strerror(ret));
-    }
-
-    //OFI_CHECK_RETURN_MSG(ret, "collective_join failed!! %d %s\n", ret, fi_strerror(ret));
-
-    ret = wait_for_join(ctx, FI_JOIN_COMPLETE, &done_flag);
-    OFI_CHECK_RETURN_STR(ret, "join_wait time failed\n");
-
-    if (ofi_coll_mc == NULL){
-        PRINT_ERROR("coll_mc is NULL\n");
-        shmem_global_exit(-FI_EINVAL);
-    }
-//    PRINT_DEBUG("Coll_mc %p\n", ofi_coll_mc);
-
-    polling_time(ctx, &done_flag);
-
-    shmem_transport_ofi_CXI_coll_addr = fi_mc_addr(ofi_coll_mc);
-
-
-    ret = fi_barrier(ep, shmem_transport_ofi_CXI_coll_addr, &done_flag);
-    OFI_CHECK_ERROR_MSG(ret, "Barrier failed %d %s\n", ret, fi_strerror(ret));
-
-    ret = polling_time(ctx, &done_flag);
-    OFI_CHECK_RETURN_STR(ret, "Polling failed\n");
-#endif
 
 }
 

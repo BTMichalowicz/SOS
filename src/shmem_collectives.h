@@ -318,6 +318,8 @@ shmem_internal_op_to_all(void *target, const void *source, size_t count,
 {
     shmem_internal_assert(type_size > 0);
 
+    PRINT_DEBUG("Type_size %lu, shmem_internal_reduce_type: %d\n", type_size, shmem_internal_reduce_type);
+
     switch (shmem_internal_reduce_type) {
         case AUTO:
             if (shmem_transport_atomic_supported(op, datatype)) {
@@ -377,11 +379,12 @@ shmem_internal_op_to_all(void *target, const void *source, size_t count,
         case HW_ACCEL:
             if (datatype_and_op_supported(datatype, op) == 1 && msg_sz_is_ok(PE_size,
                 count*type_size) == 1){
+                PRINT_DEBUG("Heading to hw_accel\n");
                 shmem_internal_op_to_all_hw_accel(target, source, count, type_size,
                         PE_start, PE_stride, PE_size,
                         pWrk, pSync, op, datatype);
             }else{
-               // RAISE_WARN_MSG("Datatype currently not supported by hardware acceleration (%d/%s). Resorting to recursive doubling\n", datatype, stringify(datatype));
+               // RAISE_WARN_MSG("Datatype currently not supported by hardware acceleration (%d/%s) OR Message size + PE with HW Acceleration resorted to degradations (Pe-size %d/msg-size %d). Resorting to recursive doubling\n", datatype, PE_size, count*type_size, stringify(datatype));
                 shmem_internal_op_to_all_recdbl_sw(target, source, count, type_size,
                         PE_start, PE_stride, PE_size,
                         pWrk, pSync, op, datatype);
