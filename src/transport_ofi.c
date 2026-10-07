@@ -1960,6 +1960,7 @@ int initialize_avset(int PE_start, int PE_stride, int PE_size){
 static inline enum fi_datatype find_type_name (char *dtype_string, int *idx){
     int i = 0;
     enum fi_datatype ret = FI_VOID;
+    PRINT_DEBUG("dtype_string: %s\n", dtype_string);
     for (i = 0; i < OSHMEM_STANDARD_len ; i++){
         if (strcmp(dtype_string, coll_type_arr[i].type) == 0 ){
             *idx = i;
